@@ -1,0 +1,1118 @@
+---
+title: "Análisis descriptivo de Banca Seguros"
+author: "Gerencia de Analítica"
+date: "14 de marzo de 2019"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    code_folding: hide
+  html_notebook:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+'%!in%' <<-  Negate('%in%')
+```
+
+
+```{r, include=FALSE}
+# Load package
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("data.table",
+               "readxl",
+               "stringr",
+               "ggplot2",
+               "lubridate",
+               "naniar",
+               "scales",
+               "GGally",
+               "ggridges",
+               "stringi")
+```
+
+```{r include=FALSE}
+# import external functions
+source("exploracion/files_tools.R")
+```
+
+
+```{r include=FALSE}
+#Cargue de bases
+staging_path <- "datos/staging"
+seguros_cl <- fread( os.path.join(staging_path, "crm_seguros.csv"))
+crm <- readRDS(os.path.join(staging_path, "crm_lp.rds"))
+seguros_cl
+crm <- data.table(crm)
+crm
+```
+
+```{r include=FALSE}
+levels_segmento_comercial = c("Micro", "Masivo", "Preferente", "Preferente Plus",
+                              "Premium", "Pj")
+
+seguros_cl[, segmento_comercial := 
+         factor(segmento_comercial, levels = levels_segmento_comercial, 
+                ordered = T)]
+```
+# ¿Qué datos tenemos?
+
+La base de vigentes de banca seguros de  20190306 (211CO96IS1002019030600)
+cuenta con 775.626 registros o pólizas entre 636.497 clientes. Al buscar la
+información de los clientes en la base de CRM de febrero se cuentan con 686.889
+pólizas, 88.7367 menos. Por el lado de clientes son 556.526, 79.971 menos. Al usar el
+diccionario de pólizas no se encontraron 9 códigos de pólizas ("673" "676" "682"
+"680" "681" "678" "672" "677" "679"). La base final con la que se se realiza la
+miscelanea de gráficas siguiente tiene 667.350 pólizas y 541.834 clientes.
+
+
+# Número de pólizas 
+
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = nombre_gr][order(-N)]
+
+base[, nombre_gr := factor(nombre_gr, levels = unique(base$nombre_gr), 
+                           ordered = T)] 
+base[, sum(N)]
+base <- seguros_cl[, .N, by = nombre_gr][order(-N)]
+order_products <- base$nombre_gr
+
+base[, nombre_gr := factor(nombre_gr, levels = order_products, 
+                           ordered = T)] 
+# profundización y labels
+base1 <- seguros_cl[, .(pro_ind = round(uniqueN(cedula)/.N, 4)), by = nombre_gr]
+base1 <- merge(base, base1, by = "nombre_gr")
+base1[, label_lp := paste0(N,  "\n", "(",round(pro_ind*100),"%)" )]
+base1[, nombre_gr := factor(nombre_gr, levels = order_products, 
+                           ordered = T)] 
+base1 <- base1[order(nombre_gr)]
+```
+
+
+```{r echo=FALSE}
+ggplot(base, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+  geom_col() +
+  labs(title = "Número de pólizas por póliza e indice de profundización",
+  x = "", y = "Número de pólizas", caption = "El indice de profundización es la relación entre el total de polizas por clientes") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5),
+  axis.text.x =  element_text(angle = 45, hjust = 1)) +
+  geom_text(
+  data = base1,
+  aes(
+  x = nombre_gr,
+  y = N ,
+  label = label_lp
+  ),
+  size = 3,
+  vjust = c(1, rep(-0.3, times = nrow(base) - 1))
+  ) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+  
+```
+
+Las pólizas más populares son Cuota protegida y Cuenta protegida. En general la
+relación entre el numero de clientes sobre el total de polizas es cercano al
+100%, lo que indica que la mayoria de personas no poseen dos veces el mismo
+seguro.
+
+
+La profundidad de banca seguros, definida como el total de seguros respecto al total de clientes activos en CRM en febrero es de:  
+
+```{r}
+print(paste0(round( (775626/2892788)*100), "%"))
+```
+
+# Canales por producto 
+```{r include=FALSE}
+base <- seguros_cl[canal != "Inactivo", .(count = .N), by = .(nombre_gr,canal)]
+base[, nombre_gr := factor(nombre_gr, levels = order_products, 
+                           ordered = T)] 
+base[, total := sum(count), by = nombre_gr]
+base[, weight := count/total]
+base
+```
+
+
+```{r echo=FALSE}
+base %>% ggplot(aes( x = nombre_gr, y = weight, fill =canal)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = nombre_gr , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Canal por producto",
+  x = "Producto", y = "Proporción") +
+  theme_minimal() +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  size = 8, 
+  hjust = 1,
+  angle = 45
+  )
+  ) +
+   scale_fill_discrete(guide = guide_legend(title = "Canal")) + 
+  theme(axis.text.y = element_text(size = 6.5))
+```
+
+Los dos seguros más populares en su mayoria son colocados a través de las
+oficinas. El seguro que más se vende via tele marketing es el de protección
+integral.
+
+# Lineas de ventas por producto 
+```{r include=FALSE}
+base <- seguros_cl[, .(count = .N), by = .(nombre_gr,linea)]
+base[, nombre_gr := factor(nombre_gr, levels = order_products, 
+                           ordered = T)] 
+base[, total := sum(count), by = nombre_gr]
+base[, weight := count/total]
+
+```
+
+```{r echo=FALSE}
+base %>% ggplot(aes( x = nombre_gr, y = weight, fill =linea)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = nombre_gr , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Linea de venta por producto",
+  x = "Producto", y = "Proporción") +
+  theme_minimal() +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  size = 8, 
+  vjust = 1,
+  hjust = 1,
+  angle = 45
+  )
+  ) +
+   scale_fill_discrete(guide = guide_legend(title = "Linea")) + 
+  theme(axis.text.y = element_text(size = 6.5))
+```
+El seguro más popular, Cuota protegida, en su mayoria es emitido para créditos de consumo. El producto bancario que mayor tiene presencia es cuentas. 
+
+
+
+# Polizas por cliente 
+```{r include=FALSE}
+base <- seguros_cl[, .(numero_seguros = .N), by = cedula][order(numero_seguros)]
+base <- base[, .(personas = .N), by = numero_seguros]
+base[, numero_seguros1 := as.character(numero_seguros)]
+base[numero_seguros > 4 , numero_seguros1 := "más de 4"]
+base <- base[, .(personas = sum(personas)), by = numero_seguros1]
+base[, numero_seguros1 := factor(numero_seguros1, levels = numero_seguros1, ordered = T)]
+base
+```
+
+```{r echo=FALSE}
+ggplot(base, aes(x = numero_seguros1, y = personas, fill = numero_seguros1)) +
+geom_col() +
+labs(title = "Número de pólizas por cliente",
+x = "Número de polizas", y = "Clientes") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text( hjust = 1)) +
+geom_text(aes(x = numero_seguros1, y = personas , label = comma(personas) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Número de pólizas"))
+
+```
+La gran mayoria de los clientes en banca segurosposeen una poliza.
+
+# Proporción de polizas por numero de polizas por persona 
+
+```{r include=FALSE}
+conteo_seguros_cedula <- seguros_cl[, .(numero_pol = .N), by = cedula]
+conteo_seguros_cedula[, numero_pol1 := as.character(numero_pol)]
+conteo_seguros_cedula[numero_pol > 4 , numero_pol1 := "más de 4"]
+
+
+seguros_cl1 <- merge(seguros_cl, conteo_seguros_cedula[, .(cedula, numero_pol1)], by = "cedula")
+base <- seguros_cl1[, .(count = .N), by = .(numero_pol1, nombre_gr)]
+base[, total := sum(count), by = numero_pol1]
+base[, weight := count/total]
+base
+```
+
+```{r echo=FALSE}
+base %>% ggplot(aes( x = numero_pol1, y = weight, fill = nombre_gr)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = numero_pol1 , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Proporción de pólizas por número de pólizas por persona",
+  x = "Número de pólizas por persona", y = "Proporción") +
+  theme_minimal() +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  size = 8, 
+  vjust = 0.5
+  )
+  ) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza")) +
+  theme(axis.text.y = element_text(size = 6.5))
+```
+A medida que los clientes poseen más seguros en su portafolio es más comun que posean varias pólizas de cuenta protegida
+
+# Canastas de pólizas
+
+```{r include=FALSE}
+base <- seguros_cl1[, .(crm_id, numero_pol1, nombre_gr)]
+base <-  dcast(base, crm_id + numero_pol1 ~  nombre_gr)
+
+base <- melt(base, id.vars = c("crm_id", "numero_pol1"))
+base <- data.table(base)
+base <- base[value != 0]
+base[, nombre_gr := paste0(variable, value)]
+base <- base[, .(numero_pol1, canasta = paste(nombre_gr, collapse =  " + ")), by = crm_id]
+base <- base[!duplicated(crm_id)]
+base1 <- base[, .(conteo = .N), by = canasta][order(-conteo)]
+base1 <- base1[1:10]
+base1[, canasta := factor(canasta, levels = unique(canasta), ordered = T) ] 
+```
+
+```{r echo=FALSE}
+base1 %>% ggplot(aes(x = canasta, y = conteo, fill = canasta)) +
+  geom_col() +
+  labs(title = "Canastas de pólizas más comunes",
+  x = "Canstas de polizas", y = "Número de clientes") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5),
+  axis.text.x =  element_blank()) +
+  geom_text(aes(
+  x = canasta,
+  y = conteo ,
+  label = comma(conteo)
+  ),
+  size = 3,
+  vjust = -0.3) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_discrete(guide = guide_legend(title = "Canastas"))
+  
+```
+Combinando el total de seguros que cada cliente tiene, obtenemos las canastas de seguros más populares. Por ejemplo existen más clientes con dos polizas de cuota protegida que seguros de cancer. Las siguientes gráficas no nos dejaba analizar por número de seguros las canastas más populares. Éste analisis permite observar que seguro ofreser a los clientes que ya poseen una o más polizas. 
+
+```{r include=FALSE}
+base2 <- base[, .(conteo = .N), by = .(numero_pol1, canasta)][order(numero_pol1, -conteo)]
+base2[, orden := rank(-conteo), by = .(numero_pol1)]
+base2 <- base2[orden <= 10]
+base2
+```
+
+```{r echo=FALSE}
+num_pol <- unique(base2$numero_pol1)
+for( i in num_pol){
+  base3 <- base2[numero_pol1 == i] 
+  base3[, canasta := factor(canasta, levels = unique(canasta), ordered = T) ] 
+  plot_base <- base3  %>% ggplot( aes(x = canasta, y = conteo, fill = canasta)) +
+geom_col() +
+labs(title = paste("Canastas de pólizas más comunes \n para clientes con", i , "pólizas"),
+x = "Canstas de polizas", y = "Número de clientes") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_blank()) +
+geom_text(aes(x = canasta, y = conteo , label = comma(conteo) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Canastas"))
+  print(plot_base)
+}
+```
+
+
+# Analisis geográfico 
+
+## Profundización por ciudad
+```{r include=FALSE}
+base <- seguros_cl1[, .(conteo = .N), by = .(municipio)][order( - conteo)][1:10]
+crm_municipio <- crm[, .(total = .N), by = municipio]
+base <- merge(base, crm_municipio, by = "municipio")
+base <- base[order(-conteo)]
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+municipio_crr <- c("Bogotá","Cali", "Medellin",  "Barranquilla", "Bucaramanga", "Cucuta", "Cartagena", "Villavicencio", "Ibague","Santa Marta")
+base[, municipio := municipio_crr]
+base[, municipio := factor(municipio, levels = municipio, ordered = T)]
+base
+```
+
+```{r echo=FALSE}
+ggplot(base, aes(x = municipio, y = conteo, fill = municipio)) +
+  geom_col() +
+  labs(title = "Número de pólizas por ciudad e indice de profundización",
+  x = "", y = "Número de pólizas", caption = "El indice de profundización es la relación entre el total de polizas por clientes") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5),
+  axis.text.x =  element_text(angle = 45, hjust = 1)) +
+  geom_text(
+  data = base,
+  aes(
+  x = municipio,
+  y = conteo ,
+  label = label_lp
+  ),
+  size = 3,
+  vjust = c(1, rep(-0.3, times = nrow(base) - 1))
+  ) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+
+```
+La ciudad más profundizada es cucutá y la menos es bogotá. 
+
+## Polizas más populares por ciudad
+```{r include=FALSE}
+base <- seguros_cl1[, .(conteo = .N), by = .(municipio, nombre_gr)][order(municipio, - conteo)]
+base[, total := sum(conteo), by = municipio]
+base[, orden := rank(-conteo), by = .(municipio)]
+base1 <- base[orden <= 10 ][order(-total, -conteo)]
+base1
+```
+
+Tomamos las 10 ciudades donde hay más clientes con polizas. En cada ciudad observamos un distinto orden de importancia de las polizas. 
+```{r echo=FALSE}
+totales <- unique(base1$total) %>% sort(decreasing = T) %>% head(10)
+               
+municipios <- base1[total %in% totales, unique(municipio)]
+
+for( i in municipios){
+  base2 <- base1[municipio == i] 
+  base2[, nombre_gr := factor(nombre_gr, levels = unique(nombre_gr), ordered = T) ] 
+  plot_base <- base2  %>% ggplot( aes(x = nombre_gr, y = conteo, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Pólizas más comunes en", i ),
+x = "Polizas", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_blank()) +
+geom_text(aes(x = nombre_gr, y = conteo , label = comma(conteo) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Pólizas"))
+  print(plot_base)
+}
+```
+
+
+# Segmento comercial
+
+## Profundización por segmento comercial
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = segmento_comercial][order(segmento_comercial)]
+crm_gr <- crm[, .(total = .N), by = segmento_comercial]
+base <- merge(base, crm_gr, by = "segmento_comercial")
+# base <- base[order(-conteo)]
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base
+```
+
+
+```{r echo=FALSE}
+
+base %>% ggplot(aes(x = segmento_comercial, y = conteo, fill = segmento_comercial)) +
+geom_col() +
+labs(title = "Número de pólizas por segmento comercial",
+x = "Segmento", y = "Número de polizas") +
+ theme_minimal()+
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+theme(axis.text.y = element_text(size = 6.5)) +
+geom_text(aes(x = segmento_comercial, y = conteo , label = label_lp ), size = 3, vjust = c(-0.3, 1, rep(-0.3, times = nrow(base) - 2))) +
+ scale_fill_discrete(guide = guide_legend(title = "Segmento comercial"))+
+ scale_y_continuous(labels = comma) 
+  
+```
+El segmento comercial más profundizado es el micro.
+
+## Polizas más populares por segmento comercial
+
+Cada segmento comercial muetsra distintas preferencias por las pólizas
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(segmento_comercial, nombre_gr)][order(segmento_comercial, -N)]
+
+```
+
+
+```{r echo=FALSE}
+segmentos <- unique(base$segmento_comercial)
+
+for(i in segmentos){
+  base_plot <- copy(base[segmento_comercial == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por póliza en segmento", i),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = comma(N) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1) 
+}
+
+  
+```
+
+
+# Segmento táctico
+
+El segmento táctico esta definido como: 
+Joven : entre 18 y 25 años. 
+Adulto: entre 26 y 59 años. 
+Experiencia: más de 60 años
+
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = segmento_tactico][order(segmento_tactico)]
+crm_gr <- crm[, .(total = .N), by = segmento_tactico]
+base <- merge(base, crm_gr, by = "segmento_tactico")
+# base <- base[order(-conteo)]
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base
+```
+
+```{r echo=FALSE}
+base %>% 
+  ggplot(aes(x = segmento_tactico, y = conteo, fill = segmento_tactico)) +
+  geom_col() +
+  labs(title = "Número de pólizas por segmento tactico e indice de profundización",
+  x = "Segmento", y = "Número de pólizas") +
+   theme_minimal()+
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme(axis.text.y = element_text(size = 6.5)) +
+  geom_text(aes(x = segmento_tactico, y = conteo , label = label_lp), size = 3, vjust = c(1, rep(-0.3, times = nrow(base) - 1))) +
+   scale_fill_discrete(guide = guide_legend(title = "Segmento tactico"))+
+   scale_y_continuous(labels = comma) 
+```
+
+El segmento más profundizado es Adulto, sin embargo el joven tiene un indice de profundización cercana. 
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(segmento_tactico, nombre_gr)][order(segmento_tactico, -N)]
+
+base
+```
+
+```{r echo=FALSE}
+segmentos <- unique(base$segmento_tactico)
+
+for(i in segmentos){
+  base_plot <- copy(base[segmento_tactico == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por póliza en segmento", i),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = comma(N) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1)
+}
+
+  
+```
+
+Cada segemnto táctico muestra distinto orden de pólizas populares.
+
+# Estrato
+
+```{r include=FALSE}
+seguros_cl[, crm_estrato := factor(crm_estrato)]
+```
+
+## segmento comercial
+```{r echo=FALSE}
+base <- seguros_cl[, .(count = .N), by = .(segmento_comercial, crm_estrato)]
+
+base[, total := sum(count), by = segmento_comercial]
+base[, weight := count/total]
+
+base %>% ggplot(aes( x = segmento_comercial, y = weight, fill = crm_estrato)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = segmento_comercial , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Estrato por segmento comercial",
+  x = "Segmento", y = "Proporción") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+    scale_fill_discrete(guide = guide_legend(title = "Estrato"))+
+   theme_minimal() + 
+  theme(axis.text.y = element_text(size = 6.5)) 
+```
+
+A medida que aumenta el segemnto comercial, la participación de los estratos socio económicos más altos aumenta de la misma forma.
+
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = crm_estrato][order(crm_estrato)]
+base[is.na(crm_estrato), crm_estrato := "Desconocido"]
+crm_gr <- crm[, .(total = .N), by = crm_estrato]
+crm_gr[is.na(crm_estrato), crm_estrato := "Desconocido"]
+base <- merge(base, crm_gr, by = "crm_estrato")
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base
+```
+
+```{r echo=FALSE}
+base %>% 
+  ggplot(aes(x = crm_estrato, y = conteo, fill = crm_estrato)) +
+  geom_col() +
+  labs(title = "Número de pólizas por estrato e indice de profundización",
+  x = "Estrato", y = "Número de pólizas") +
+   theme_minimal()+
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme(axis.text.y = element_text(size = 6.5)) +
+  geom_text(aes(x = crm_estrato, y = conteo , label = label_lp), size = 3, vjust = c(-0.3,1, rep(-0.3, times = nrow(base) - 2))) +
+   scale_fill_discrete(guide = guide_legend(title = "Estrato"))+
+   scale_y_continuous(labels = comma) 
+```
+El estrato más profundizaco es estarato 1.                                     
+
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(crm_estrato, nombre_gr)][order(crm_estrato, -N)]
+base[is.na(crm_estrato), crm_estrato := "Desconocido"]
+base
+```
+
+```{r echo=FALSE}
+estratos <- unique(base$crm_estrato)
+
+for(i in estratos){
+  base_plot <- copy(base[crm_estrato == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por póliza en estrato", i),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = comma(N) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1)
+}
+
+```
+# Sexo
+
+## Segmento comercial
+```{r echo=FALSE}
+base <- seguros_cl[, .(count = .N), by = .(segmento_comercial, crm_genero)]
+
+base[, total := sum(count), by = segmento_comercial]
+base[, weight := count/total]
+
+base %>% ggplot(aes( x = segmento_comercial, y = weight, fill = crm_genero)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = segmento_comercial , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Sexo por segmento comercial",
+  x = "Segmento", y = "Proporción") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+      scale_fill_discrete(guide = guide_legend(title = "Sexo"))+
+   theme_minimal() + 
+  theme(axis.text.y = element_text(size = 6.5)) 
+```
+
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = crm_genero][order(crm_genero)]
+base[crm_genero == "", crm_genero := "Desconocido"]
+base[crm_genero == "F", crm_genero := "Femenino"]
+base[crm_genero == "M", crm_genero := "Masculino"]
+
+crm_gr <- crm[, .(total = .N), by = crm_genero]
+crm_gr[is.na(crm_genero), crm_genero := "Desconocido"]
+crm_gr[crm_genero == "F", crm_genero := "Femenino"]
+crm_gr[crm_genero == "M", crm_genero := "Masculino"]
+
+base <- merge(base, crm_gr, by = "crm_genero")
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base
+```
+
+```{r echo=FALSE}
+base %>% 
+  ggplot(aes(x = crm_genero, y = conteo, fill = crm_genero)) +
+  geom_col() +
+  labs(title = "Número de pólizas por sexo e indice de profundización",
+  x = "Sexo", y = "Número de pólizas") +
+   theme_minimal()+
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme(axis.text.y = element_text(size = 6.5)) +
+  geom_text(aes(x = crm_genero, y = conteo , label = label_lp), size = 3, vjust = c(-0.3, -0.3, 1)) +
+   scale_fill_discrete(guide = guide_legend(title = "Sexo"))+
+   scale_y_continuous(labels = comma) 
+```
+
+El sexo más profundizado es el masculino
+
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(crm_genero, nombre_gr)][order(crm_genero, -N)]
+base[crm_genero == "", crm_genero := "desconocido"]
+base[crm_genero == "F", crm_genero := "femenino"]
+base[crm_genero == "M", crm_genero := "masculino"]
+base
+```
+
+```{r echo=FALSE}
+sexos <- unique(base$crm_genero)
+
+for(i in sexos){
+  base_plot <- copy(base[crm_genero == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por póliza en el sexo", i),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = N ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1)
+}
+
+```
+ Los hombres prefieren más los seguros de accidentes personales que las mujeres. 
+ 
+#Número personas a cargo menores de 18 años
+
+```{r include=FALSE}
+seguros_cl[, num_menores := crm_num_personas_cargo_men18]
+seguros_cl[num_menores > 2, num_menores := 99]
+seguros_cl[, num_menores := factor(num_menores,
+                                   levels = c(0, 1, 2, 99),
+                                   labels = c("0", "1", "2", "2+"))]
+                                   
+```
+
+```{r echo=FALSE}
+
+base <- seguros_cl[, .(count = .N), by = .(segmento_comercial, num_menores)]
+
+base[, total := sum(count), by = segmento_comercial]
+base[, weight := count/total]
+
+base %>% ggplot(aes( x = segmento_comercial, y = weight, fill = num_menores)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = segmento_comercial , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Número personas a cargo menores de 18 años",
+  x = "Segmento", y = "Proporción") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+   scale_fill_discrete(guide = guide_legend(title = "Personas a cargo \n menores de 18 años"))+
+   theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5))
+ 
+```
+
+La mayoria de los clientes no poseen personas a cargo
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = num_menores][order(num_menores)]
+
+crm[, num_menores := crm_num_personas_cargo_men18]
+crm[num_menores > 2, num_menores := 99]
+crm[, num_menores := factor(num_menores,
+                                   levels = c(0, 1, 2, 99),
+                                   labels = c("0", "1", "2", "2+"))]
+
+crm_gr <- crm[, .(total = .N), by = num_menores]
+
+base <- merge(base, crm_gr, by = "num_menores")
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base
+```
+
+
+```{r echo=FALSE}
+base %>% 
+  ggplot(aes(x = num_menores, y = conteo, fill = num_menores)) +
+  geom_col() +
+  labs(title = "Número de pólizas por número de personas a cargo \n 
+       menores de 18 años e indice de profundización",
+  x = "", y = "Número de pólizas") +
+   theme_minimal()+
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme(axis.text.y = element_text(size = 6.5)) +
+  geom_text(aes(x = num_menores, y = conteo , label = label_lp), size = 3, vjust = c(1, -0.3, -0.3, -0.3)) +
+   scale_fill_discrete(guide = guide_legend(title = "Número de personas"))+
+   scale_y_continuous(labels = comma) 
+```
+
+A media que los clientes tienen más personas a cargo, están más profundizados. 
+
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(num_menores, nombre_gr)][order(num_menores, -N)]
+base
+```
+
+```{r echo=FALSE}
+menores <- unique(base$num_menores)
+
+for(i in menores){
+  base_plot <- copy(base[num_menores == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por pólizas por clientes con \n",  i ,"personas a cargo menores de 18 años"),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = comma(N) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1)
+}
+
+```
+
+# Estado civil
+
+
+```{r echo=FALSE}
+base <- seguros_cl[, .(count = .N), by = .(segmento_comercial, crm_nombre_estado_civil)]
+
+base[, total := sum(count), by = segmento_comercial]
+base[, weight := count/total]
+
+base %>% ggplot(aes( x = segmento_comercial, y = weight, fill = crm_nombre_estado_civil)) +
+  geom_bar(stat = "identity")  +
+    geom_text(  aes(x = segmento_comercial , y = 1 , label = comma(total)), size = 3, vjust = -0.5) +
+  labs(title = "Estado civil por segmento comercial",
+  x = "Segmento", y = "Proporción") +
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+   scale_fill_discrete(guide = guide_legend(title = "Estado civil"))+
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5))
+```
+
+Segmentos co,o preferente y premium son ocupados por su mayoria por clientes casados. 
+
+```{r include=FALSE}
+base <- seguros_cl[, .(conteo = .N), by = crm_nombre_estado_civil][order(crm_nombre_estado_civil)]
+
+crm_gr <- crm[, .(total = .N), by = crm_nombre_estado_civil]
+
+base <- merge(base, crm_gr, by = "crm_nombre_estado_civil")
+base[, prof := paste0("(", round(conteo/total *100, 1), "%)")]
+base[, label_lp := paste0(conteo,  "\n", prof )]
+base <- base[order(-conteo)]
+base[, crm_nombre_estado_civil := factor(crm_nombre_estado_civil, levels = crm_nombre_estado_civil, ordered = T)]
+base
+```
+
+
+```{r echo=FALSE}
+base %>% 
+  ggplot(aes(x = crm_nombre_estado_civil, y = conteo, fill = crm_nombre_estado_civil)) +
+  geom_col() +
+  labs(title = "Número de pólizas por estado civil e indice de profundización",
+  x = "", y = "Número de pólizas") +
+   theme_minimal()+
+  theme(
+  plot.title = element_text(face = "bold", hjust = 0.5),
+  axis.text.x = element_text(
+  hjust = 0.5,
+  vjust = 0,
+  size = 8
+  )
+  ) +
+  theme(axis.text.y = element_text(size = 6.5)) +
+  geom_text(aes(x = crm_nombre_estado_civil, y = conteo , label = label_lp), size = 3, vjust = c(1, rep(-0.3, nrow(base)-1))) +
+   scale_fill_discrete(guide = guide_legend(title = "Estado civil"))+
+   scale_y_continuous(labels = comma) 
+```
+
+Los clientes solteros y en unión libre son los más profundizados
+
+```{r include=FALSE}
+base <- seguros_cl[, .N, by = .(crm_nombre_estado_civil, nombre_gr)][order(crm_nombre_estado_civil, -N)]
+base[crm_nombre_estado_civil == "", crm_nombre_estado_civil := "desconocido"]
+base
+```
+
+```{r echo=FALSE}
+estado_civil <- unique(base$crm_nombre_estado_civil)
+
+for(i in estado_civil){
+  base_plot <- copy(base[crm_nombre_estado_civil == i])
+  base_plot[, nombre_gr := factor(nombre_gr, levels = unique(base_plot$nombre_gr), 
+                           ordered = T)] 
+plot1 <- ggplot(base_plot, aes(x = nombre_gr, y = N, fill = nombre_gr)) +
+geom_col() +
+labs(title = paste("Número de pólizas por pólizas por clientes \n en estado civil", tolower(i) ),
+x = "Producto", y = "Número de pólizas") +
+theme(
+plot.title = element_text(face = "bold", hjust = 0.5),
+axis.text.x = element_text(
+hjust = 0.5,
+vjust = 0,
+size = 8
+)
+) +
+  theme_minimal() +
+theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+geom_text(aes(x = nombre_gr, y = N , label = comma(N) ), size = 3, vjust = -0.3) +
+ scale_y_continuous(labels = comma) +
+   scale_fill_discrete(guide = guide_legend(title = "Póliza"))
+print(plot1)
+}
+
+```
+# Ingresos 
+
+```{r include=FALSE}
+seguros_cl[, ingresos_millones := crm_valor_ing_bru_mes/1000000]
+ggplot(seguros_cl, aes(x = ingresos_millones)) + 
+  geom_density(alpha = 0.3, fill = "royalblue", color = "darkblue" )+ 
+  facet_wrap(~ nombre_gr , scales = "free") +
+   scale_x_continuous(labels = comma) +
+   theme_minimal() +
+ theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) +
+  labs(title = "Antigüedad (meses) por segmento comercial", 
+  x = "", y = "Antigüedad")
+
+```
+
+```{r echo=FALSE}
+medianas <- seguros_cl[, .(ingresos_millones = round(median(ingresos_millones, na.rm = T), 0)), by = nombre_gr]
+
+ggplot(seguros_cl, aes(x = nombre_gr, y = ingresos_millones)) + geom_boxplot(aes(fill = nombre_gr)) +
+   theme_minimal() +
+  theme(axis.text.y = element_text(size = 6.5), 
+      axis.text.x =  element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma, limits = c(0, 50)) +
+  scale_x_discrete(limits = order_products) +
+  scale_fill_discrete(guide = guide_legend(title = "Segmentos")) +
+  labs(
+  subtitle = "Todos los segmentos",
+  caption = "Nota: Con límite hasta 50 millones de pesos",
+  x = "Segmentos",
+  y = "Ingreso (en  millones COP)"
+  ) +
+  
+  geom_text(
+  data = medianas,
+  aes(label = ingresos_millones),
+  position = position_dodge(width = 1),
+  vjust = -0.1
+  )
+
+
+```
+
+# Perfiles por póliza
+LA siguiente tabla muestra a partir de las distintas variables de crm, los perfiles más comunes de los clientes para cada póliza.
+```{r include=FALSE}
+base <-
+  seguros_cl[, .(
+  conteo = .N,
+  prom_edad = round(mean(edad), 1),
+  median_edad =  round(median(edad), 1),
+  sd_edad =  round(sd(edad), 1),
+  prom_antg =  round(mean(antiguedad), 1),
+  median_antg =  round(median(antiguedad), 1),
+  sd_antg =  round(sd(antiguedad), 1),
+  prom_ing =  round(mean(ingresos_millones, na.rm = T), 1),
+  median_ing =  round(median(ingresos_millones, na.rm = T),1) ,
+  sd_ing =  round(sd(ingresos_millones, na.rm = T), 1)
+  ), by = nombre_gr]
+  base
+  
+```
+
+```{r include=FALSE}
+base1 <-
+  seguros_cl[, .(conteo_mun  = .N), by = .(nombre_gr, municipio)][order(nombre_gr,-conteo_mun)][municipio %in% municipios]
+base1 <-
+  merge(base1, base[, .(nombre_gr, conteo)], by = c("nombre_gr"))
+base1[, conteo_mun := round((conteo_mun/conteo)*100, 2)]
+base1[, conteo := NULL]
+base1 <-
+  dcast(base1, nombre_gr ~ municipio, value.var = "conteo_mun")
+base1
+
+```
+
+```{r include=FALSE}
+base2 <-  seguros_cl[ , .(conteo_mun  = .N), by = .(nombre_gr, crm_estrato)][order(nombre_gr, -conteo_mun)]
+base2[is.na(crm_estrato), crm_estrato := "desconocido" ]
+base2[, crm_estrato := paste0("estrato_", crm_estrato)]
+base2 <-
+  merge(base2, base[, .(nombre_gr, conteo)], by = c("nombre_gr"))
+base2[, conteo_mun := round((conteo_mun/conteo)*100, 2)]
+base2[, conteo := NULL]
+base2 <- dcast(base2, nombre_gr ~ crm_estrato, value.var = "conteo_mun")
+base2
+```
+
+```{r echo=FALSE}
+base <- merge(base, base1, by = "nombre_gr", all.x = T)
+base <- merge(base, base2, by = "nombre_gr", all.x = T)
+base
+```
+```{r}
+
+```
+

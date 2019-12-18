@@ -1,0 +1,281 @@
+---
+title: "Tablero seguimiento modelos"
+author: "Daniel Zapata"
+date: "15 de noviembre de 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r include=FALSE}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+numbers_months <- 3
+```
+
+```{r include=FALSE}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+```
+```{r months to process, include=FALSE}
+
+```
+
+
+```{r datos emisiones, include=FALSE}
+months_process <- sapply(1:numbers_months,date_file)
+emisiones_files <- data.table(files = list.files(emisions_path, full.names = T))
+emisiones_files[, month := str_sub(files, -11, -5) %>% gsub(pattern = "_", replacement = "")]
+emisiones_files <- emisiones_files[ month %in% c(months_process, date_file(0))]
+emisiones <- list()
+for(i in 1:nrow(emisiones_files)){
+  emisiones[[i]] <- fread(emisiones_files[i, files])
+  # emisiones[[i]][, periodo := gsub(pattern = "_", replacement = "", str_sub(emisiones_files[i], -11, -5))]
+}
+emisiones <- rbindlist(emisiones)
+emisiones[, periodo := substr(FechaProceso, 1, 6)]
+emisiones <- emisiones[CodProdSeguro %in% c(673, 682, 676), .(periodo, oferta_tmk_codigo = CodProdSeguro, definit = paste0(TipoDocAsegurado, NumDocAsegurado))]
+emisiones[, .N, by = .(periodo, oferta_tmk_codigo)]
+emisiones[, emision := 1]
+```
+```{r cargue analytics, include=FALSE}
+months_process <- sapply(2:(numbers_months+1),date_file)
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue")
+cargue <- list()
+for(i in months_process){
+  cargue[[i]] <- get_path(cargue_path, i)%>%
+  get_path(paste0("cargue_campañas_all_", i)) %>% 
+  fread()
+}
+cargue <- rbindlist(cargue, fill = T)
+cargue <-
+  cargue[, .(
+  definit,
+  periodo,
+  pred_cancer,
+  pred_pif,
+  pred_fraude,
+  edad,
+  oferta_tmk,
+  grupo,
+  oferta_tmk_codigo
+  )]
+# arreglo para la data de julio para la campaña de agosto  
+cargue[oferta_tmk == "pif", ':='(pred_oferta = pred_pif)] 
+cargue[oferta_tmk == "cancer", ':='(pred_oferta = pred_cancer)] 
+cargue[oferta_tmk == "fraude", ':='(pred_oferta = pred_fraude)] 
+head(cargue)
+```
+
+```{r envio campañas, include=FALSE}
+months_process <- sapply(1:numbers_months,date_file) %>% paste(collapse ="|")
+envios_files <- list.files(envios_path, full.names = T)
+envios_files <- grep(months_process, envios_files, value = T)
+envios <- list()
+for(i in 1:length(envios_files)){
+  envios[[i]] <-read.xlsx(envios_files[i]) %>% data.table()
+  envios[[i]][, periodo :=  str_sub(envios_files[i], -11, -6)]
+}
+envios <- rbindlist(envios)
+names(envios) <- tolower(names(envios))
+head(envios)
+```
+```{r mergue tables, include=FALSE}
+cargue <- cargue[definit %in% envios$definit]
+setnames(cargue, "periodo", "periodo_datos")
+setnames(emisiones, "periodo", "periodo_camp")
+resultados <- merge(cargue, emisiones, by = c("definit", "oferta_tmk_codigo"), all.x = T)
+resultados[is.na(emision), emision := 0]
+resultados[, periodo_datos := as.Date(periodo_datos)]
+resultados[, periodo := as.Date(paste(
+  lubridate::year(periodo_datos),
+  lubridate::month(periodo_datos) +
+  2,
+  lubridate::day(periodo_datos)
+  ,
+  sep = "-"
+  ),
+  format = "%Y-%m-%d")]
+resultados <-  resultados[!duplicated(paste0(definit, oferta_tmk, periodo))]
+```
+
+```{r corroboración de cifras y numero de registros, echo=FALSE}
+resultados[, .N, by = periodo]
+resultados[, .(
+  clientes = .N,
+  emisiones = sum(emision),
+  efectividad_emision = sum(emision) / .N
+  ), by = .(periodo, oferta_tmk)][order(periodo, oferta_tmk)]
+resultados[, .(
+  clientes = .N,
+  emisiones = sum(emision),
+  efectividad_emision = sum(emision) / .N
+  ), by = .(periodo, oferta_tmk, grupo)][order(periodo, oferta_tmk, grupo)]  
+```
+
+```{r predicciones en test, include=FALSE}
+models_path <-
+  os.path.join(root_path,
+  "DEDGA-BS_ctas_propension_compra/propension_compra/model_selection")
+file_name <- "pred_test"
+months_process <- sapply(2:(numbers_months + 1), date_file)
+products <- c("cancer", "pif", "fraude")
+product_test <- list()
+for (i in products) {
+  product_path <-
+    get_path(models_path, paste(months_process, collapse = "|"))
+  product_path <- grep(i, product_path, value = T)
+  product_pred_test <- list()
+  for (j in product_path) {
+    product_pred_test[[j]] <- get_path(j, file_name) %>% fread()
+  }
+  product_pred_test <- rbindlist(product_pred_test)
+  product_pred_test[, decil := cut(
+    xgb_auc_pred,
+    quantile(xgb_auc_pred, probs = seq(0, 1, by = 0.1)),
+    labels = paste0("decil_", seq(1, 10, by = 1)),
+    include.lowest = TRUE
+  ), by = periodo]
+  product_pred_test[, product := i]
+  product_test[[i]] <- product_pred_test
+}
+product_test <- rbindlist(product_test)
+vars <- c("definit", "periodo", "target", "xgb_auc_pred", "xgb_auc_pred_num", "decil", "product")
+product_test <- product_test[, mget(vars)]
+  
+```
+
+# Seguimiento de tasa de efectividad
+
+## Efectividad productos 
+
+```{r efectividad productos,  echo=FALSE}
+
+plot_aux <- resultados[, .(
+  clientes = .N,
+  emisiones = sum(emision),
+  efectividad_emision = sum(emision) / .N
+  ), by = .(periodo, oferta_tmk)][order(periodo, oferta_tmk)]
+plot_aux[, efectividad_plot := paste0(round(efectividad_emision*100, 2), "%")]
+  ylim.prim <- c(0, 50000)   # in this example, precipitation
+ylim.sec <- c(0, 0.1)    # in this example, temperature
+
+b <- diff(ylim.prim)/diff(ylim.sec)
+a <- b*(ylim.prim[1] - ylim.sec[1])
+color_tasa <- "black"
+color_clientes <- "#138cbb"
+
+for(i in products){
+  p <- ggplot(plot_aux[oferta_tmk == i], aes(x = periodo, y = clientes)) +
+  geom_col(fill = color_clientes) +
+  geom_line(aes(y = a + efectividad_emision*b), color = color_tasa, size = 1 ) +
+  geom_point(aes(y = a + efectividad_emision*b)) +
+  geom_text(aes(label = efectividad_plot), color= color_tasa, vjust=1.6, size=3.5) +
+  scale_y_continuous("Clientes", sec.axis = sec_axis(~ (. - a)/b, name = "Tasa de efectividad")) +
+  theme(axis.line.y.right = element_line(color = color_tasa ), 
+        axis.ticks.y.right = element_line(color = color_tasa ),
+        axis.text.y.right = element_text(color = color_tasa ), 
+        axis.title.y.right = element_text(color = color_tasa ),
+        axis.line.y.left = element_line(color = color_clientes ), 
+        axis.ticks.y.left = element_line(color = color_clientes ),
+        axis.text.y.left = element_text(color = color_clientes ), 
+        axis.title.y.left = element_text(color = color_clientes )
+        )   +
+  ggtitle(paste("Seguimiento efectividad póliza:", i)) 
+  plot(p)
+}
+ 
+
+
+```
+```{r}
+ggplot(plot_aux, aes(x = periodo, y = efectividad_emision, group = oferta_tmk)) +
+  geom_line(aes(color = oferta_tmk)) +
+  geom_point(aes(color = oferta_tmk)) +
+  geom_text( aes(label = efectividad_plot, color= oferta_tmk), vjust=1.6, size=3.5) +
+  labs( title = "Seguimiento tasas de efectividad", y = "Efectividad", color = "Pólizas")
+
+  
+```
+
+## Efectividad productos vs modelo
+
+```{r}
+plot_aux <- resultados[, .(
+  clientes = .N,
+  emisiones = sum(emision),
+  efectividad = sum(emision) / .N
+  ), by = .(periodo, oferta_tmk)][order(periodo, oferta_tmk)]
+plot_aux[, efectividad_plot := paste0(round(efectividad*100, 2), "%")]
+plot_aux[, grupo := "agregado"]
+
+plot_aux1 <- resultados[, .(
+  clientes = .N,
+  emisiones = sum(emision),
+  efectividad = sum(emision) / .N
+  ), by = .(periodo, oferta_tmk, grupo)]
+plot_aux1[, efectividad_plot := paste0(round(efectividad*100, 2), "%")]
+plot_aux2 <- rbindlist(list(plot_aux, plot_aux1), use.names = T)
+
+for(i in products){
+  p <- ggplot(plot_aux2[oferta_tmk == i], aes(x = periodo, y = efectividad, group = grupo)) +
+  geom_line(aes(color = grupo)) +
+  geom_point(aes(color = grupo)) +
+  geom_text( aes(label = efectividad_plot, color= grupo), vjust=1.6, size=3.5) +
+  labs( title = paste("Seguimiento tasas de efectividad vs modelo para la póliza:", i ), y = "Efectividad", color = "Pólizas")
+  plot(p)
+  
+}
+```
+
+#
+
+```{r}
+
+base_fede <- resultados[emision == 1, .(definit, oferta_tmk_codigo, periodo, grupo)]
+fwrite(base_fede, "base_fede.csv")
+```
+
+
+# Tasas de efectividad esperadas
+
+# Predicciones próxima campaña 
+
+# 

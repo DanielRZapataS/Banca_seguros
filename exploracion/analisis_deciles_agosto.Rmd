@@ -1,0 +1,210 @@
+---
+title: "Análisis Deciles Agosto"
+author: "Paula Quintana"
+date: "18 de octubre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("DEDGA-BS_ctas_propension_compra/scripts/files_tools.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/utils.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/common_reports.R")
+
+```
+
+```{r}
+info_path <- "Z:/Informacion_Centralizada/Data_Analytics/"
+root_path <- "Y:/"
+
+original_path <- os.path.join(root_path, "datos/original")
+emisiones_path <- os.path.join(original_path, "emisiones_tmk")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201907")
+envios_path <- os.path.join(original_path, "envio_campañas_tmk")
+resultados_ventas_path <- os.path.join(original_path, "resultados_tmk/resultados_ventas_tmk")
+scoring_master_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/datos/master/master_scoring")
+models_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/propension_compra")
+results_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/resultados")
+```
+
+#Cargue
+```{r}
+cargue_201908 <- get_path(cargue_path, "cargue_campañas_all_201907")%>%fread()
+names(cargue_201908)
+head(cargue_201908)
+unique(cargue_201908$oferta_tmk_codigo)
+summary(factor(cargue_201908$oferta_tmk_codigo))
+```
+
+#Envios
+##Envios Campañas
+```{r}
+envios_201908 <- get_path(envios_path, "Envios_201908")%>%read.xlsx()%>%as.data.table()
+names(envios_201908)
+names(envios_201908) <- tolower(names(envios_201908))
+colnames(envios_201908)[colnames(envios_201908)=="campaña"] <- "campana"
+head(envios_201908)
+unique(envios_201908$oferta)
+summary(factor(envios_201908$oferta))  
+```
+
+###Envios Propensión
+```{r}
+envios_propension_201908 <- envios_201908[grepl("STOCK", campana)] %>%
+  filter(oferta == 673 | oferta == 676 | oferta == 682)
+head(envios_propension_201908)
+unique(envios_propension_201908$oferta)
+summary(factor(envios_propension_201908$oferta))
+```
+
+```{r}
+envios_propension_201908 <- as.data.table(merge(envios_propension_201908, cargue_201908, by = "definit"))
+```
+
+#Resultados TMK
+
+##Resultados Cáncer
+```{r}
+resultados_cancer_201908 <- os.path.join(resultados_ventas_path, "cancer")%>%
+  get_path("resultados_cta_cancer_673_tmk_201908")%>%fread()
+names(resultados_cancer_201908)
+names(resultados_cancer_201908) <- tolower(names(resultados_cancer_201908))
+unique(resultados_cancer_201908$'reporte_llamadas_estadobases[ventas]')
+summary(factor(resultados_cancer_201908$'reporte_llamadas_estadobases[ventas]'))
+resultados_cancer_201908[, oferta:= 673]
+```
+
+##Resultados PIF
+```{r}
+resultados_pif_201908 <- os.path.join(resultados_ventas_path, "pif")%>%
+  get_path("resultados_cta_pif_676_tmk_201908")%>%fread()
+names(resultados_pif_201908)
+names(resultados_pif_201908) <- tolower(names(resultados_pif_201908))
+unique(resultados_pif_201908$'reporte_llamadas_estadobases[ventas]')
+summary(factor(resultados_pif_201908$'reporte_llamadas_estadobases[ventas]'))
+resultados_pif_201908[, oferta:= 676]
+```
+
+##Resultados Fraude
+```{r}
+resultados_fraude_201908 <- os.path.join(resultados_ventas_path, "fraude")%>%
+  get_path("resultados_cta_fraude_682_tmk_201908")%>%fread()
+names(resultados_fraude_201908)
+names(resultados_fraude_201908) <- tolower(names(resultados_fraude_201908))
+unique(resultados_fraude_201908$'reporte_llamadas_estadobases[ventas]')
+summary(factor(resultados_fraude_201908$'reporte_llamadas_estadobases[ventas]'))
+resultados_fraude_201908[, oferta:= 682]
+```
+
+```{r}
+resultados_201908 <- rbind(resultados_cancer_201908,resultados_fraude_201908)
+resultados_201908 <- rbind(resultados_201908, resultados_pif_201908)
+unique(resultados_201908$oferta)
+```
+
+```{r}
+rm(resultados_cancer_201908, resultados_pif_201908, resultados_fraude_201908)
+```
+
+#### Ventas cantadas TMK
+```{r}
+ventas_201908 <- merge(envios_propension_201908, resultados_201908[, c("reporte_llamadas_estadobases[ventas]", "reporte_llamadas_estadobases[cccliente]", "oferta")], by.x = c("num_id", "oferta_tmk_codigo" ), by.y = c( "reporte_llamadas_estadobases[cccliente]", "oferta"))
+colnames(ventas_201908)[colnames(ventas_201908)=="reporte_llamadas_estadobases[ventas]"] <- "venta"
+```
+
+```{r}
+var <- c("num_id", "oferta_tmk_codigo", "definit", "oferta_tmk", "grupo", "venta")
+
+venta_federico <- ventas_201908[, mget(var)]
+venta_federico <- venta_federico[, periodo:= "201908"]
+fwrite(venta_federico, "//bdbemcfs/Banca_Seguros_Analytics/salidas_cosechas/ventas_agosto.csv")
+```
+
+#DECILES Y VENTAS OBSERVADAS PARA AGOSTO
+Tener en cuenta los valores extremos de los deciles para determinar el rango de los score para los clientes en cada decil
+
+```{r}
+ventas_201908[, decil_oferta:= gsub("_", "_0", decil_oferta)]
+ventas_201908$decil_oferta[ventas_201908$decil_oferta == "decil_010"] <- "decil_10"
+```
+
+```{r}
+ventas_201908[oferta_tmk == "pif", ':='(pred_oferta = pred_pif, decil_oferta = decil_pif)] 
+ventas_201908[oferta_tmk == "cancer", ':='(pred_oferta = pred_cancer, decil_oferta = decil_cancer)] 
+ventas_201908[oferta_tmk == "fraude", ':='(pred_oferta = pred_fraude, decil_oferta = decil_fraude)]
+```
+
+##Ventas
+```{r}
+ventas_201908[, .N, by = .(grupo, venta, oferta)][order(oferta, grupo)]
+```
+
+```{r}
+ventas_201908[, .(ventas = sum(venta), registros = .N), by = .(oferta)]
+```
+
+```{r}
+ventas_201908 %>%
+  group_by(decil_oferta) %>%
+  mutate_if(is.numeric, round, digits = 5)%>%
+  summarize(registros = n(), ventas= sum(venta == 1 & grupo == "control"), score_min = min(pred_oferta), score_max = max(pred_oferta))
+```
+
+```{r}
+ventas_201908[oferta_tmk_codigo == 673, .(ventas = sum(venta), registros = .N, score_min = min(pred_oferta), score_max = max(pred_oferta)), by = .(decil_oferta)][order(decil_oferta)]
+```
+```{r}
+ventas_201908[oferta_tmk_codigo == 676, .(ventas = sum(venta), registros = .N, score_min = min(pred_oferta), score_max = max(pred_oferta)), by = .(decil_oferta)][order(decil_oferta)]
+```
+
+```{r}
+ventas_201908[oferta_tmk_codigo == 682, .(ventas = sum(venta), registros = .N, score_min = min(pred_oferta), score_max = max(pred_oferta)), by = .(decil_oferta)][order(decil_oferta)]
+```
+
+##Ventas por deciles consolidado
+```{r}
+ventas_201908 %>%
+  group_by(decil_oferta) %>%
+  mutate_if(is.numeric, round, digits = 5)%>%
+  summarize(registros = n(), ventas_azar = sum(venta == 1 & grupo == "control"), colocacion_azar = (ventas_azar/registros)*100, ventas_modelo = sum(venta == 1 & grupo == "tratamiento"), colocacion_modelo = (ventas_modelo/registros)*100, score_min = min(pred_oferta), score_max = max(pred_oferta))
+```
+
+##Ventas por deciles y producto consolidado
+```{r}
+ventas_201908 %>%
+  group_by(oferta_tmk, decil_oferta) %>%
+  mutate_if(is.numeric, round, digits = 5)%>%
+  summarize(registros = n(), ventas_azar = sum(venta == 1 & grupo == "control"), ventas_modelo = sum(venta == 1 & grupo == "tratamiento"), score_min = min(pred_oferta), score_max = max(pred_oferta))
+```
+
+```{r}
+aux <- 6ventas_201908 %>%
+  group_by(oferta_tmk, decil_oferta) %>%
+  mutate_if(is.numeric, round, digits = 5)%>%
+  summarize(registros = n(), ventas_azar = sum(venta == 1 & grupo == "control"), colocacion_azar = (ventas_azar/registros)*100, ventas_modelo = sum(venta == 1 & grupo == "tratamiento"), colocacion_modelo = (ventas_modelo/registros)*100, score_min = min(pred_oferta), score_max = max(pred_oferta))
+```

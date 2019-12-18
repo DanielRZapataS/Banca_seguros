@@ -1,0 +1,116 @@
+---
+title: "analisis cambio tablas clientes potencial"
+author: "Daniel Zapata"
+date: "16 de octubre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201907")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+```
+
+```{r}
+potencial_files <- list.files(get_path(original_path, "potencial_piloto_cuentas")[1], full.names = T)
+potencial_files <- potencial_files[-1]
+
+potencial_data <- list()
+i = 1
+for(i in 1:length(potencial_files)){
+  potencial_data[[i]] <- read.xlsx(potencial_files[i]) %>% data.table
+  potencial_data[[i]][, periodo := str_sub(potencial_files[i], -11, -6)]
+}
+```
+
+```{r}
+potencial_data <- rbindlist(potencial_data)
+potencial_data[, periodo := as.numeric(periodo)]
+potencial_data[, periodo_1 := periodo +1]
+names(potencial_data) <- tolower(names(potencial_data))
+
+potencial_data_1 <- merge(potencial_data[, .(periodo,  definit1, grupo.1 = "x")], 
+                          potencial_data[, .(periodo_1, definit1, grupo.2 = "y")], 
+                          by.x = c("periodo", "definit1"), by.y = c("periodo_1", "definit1"), all = T)
+potencial_data_1 <-
+  potencial_data_1[periodo %!in% unique(potencial_data_1$periodo)[c(1, length(unique(potencial_data_1$periodo)))]]
+  
+potencial_data_1[grupo.1 == "x" & is.na(grupo.2), tipo := "add"]
+potencial_data_1[grupo.2 == "y" & is.na(grupo.1), tipo := "drop"]
+potencial_data_1[grupo.1 == "x" & grupo.2 == "y", tipo := "stock"]
+aux <- potencial_data_1[tipo != "drop", .(clients = .N), by = .(periodo, tipo)][, total := sum(clients), by = periodo]
+aux[, clients_per := paste0(round((clients/total)*100, 2), "%")]
+aux <- aux[order(periodo, -tipo)]
+aux[, clients_acu := cumsum(clients), by = .(periodo)]
+# aux[, tipo := factor(tipo, ordered = T)]
+# aux[, clients_per := factor(clients_per, ordered = T)]
+# aux[, clients_acu := factor(clients_acu, ordered = T)]
+
+```
+
+```{r}
+ggplot(data = aux, aes(x = periodo, y = clients, fill = tipo)) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    aes(y = clients_acu, label = clients_per),
+    vjust = 1.6,
+    size = 3.5
+    )
+    
+```
+
+```{r}
+ggplot(data = aux, aes(x = periodo, y = clients, fill = tipo)) +
+  geom_bar(stat = "identity", position=position_dodge()) +
+  geom_text(
+    aes( label = clients), position = position_dodge(0.9), 
+    vjust = 1.6,
+    size = 3.5
+    )
+```
+
+
+

@@ -1,0 +1,126 @@
+---
+title: "Caracterización Grupo Tratatmiento"
+author: "Paula Quintana"
+date: "26 de septiembre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx,
+  tm,
+  Metrics, 
+  DALEX,
+  gridExtra,
+  Ckmeans.1d.dp,
+  wesanderson)
+'%!in%' <<-  Negate('%in%')
+source("DEDGA-BS_ctas_propension_compra/scripts/files_tools.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/utils.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/common_reports.R")
+```
+
+```{r}
+info_path <- "Z:/Informacion_Centralizada/Data_Analytics/"
+root_path <- "Y:/"
+
+original_path <- os.path.join(root_path, "datos/original")
+emisiones_path <- os.path.join(original_path, "emisiones_tmk")
+caracterizacion_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/caracterizacion_clientes")
+scoring_master_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/datos/master/master_scoring")
+```
+
+#Resultados
+```{r}
+resultados <- get_path(caracterizacion_path, "resumen_gestion_modelo_201906_201908")%>%fread()
+names(resultados)
+head(resultados)
+unique(resultados$oferta_tmk_codigo)
+unique(resultados$periodo)
+summary(factor(resultados$oferta_tmk_codigo))
+```
+
+```{r}
+resultados[, .N, by = .(periodo, oferta_tmk)][order(oferta_tmk)]
+```
+```{r}
+resultados[, .N, by = .(periodo, oferta_tmk, venta)][order(oferta_tmk)]
+```
+
+##Resultados Tratamiento
+```{r}
+tratamiento <- as.data.table(resultados %>%
+    filter(grupo == "tratamiento"))
+head(tratamiento)
+```
+
+```{r}
+tratamiento[, .N, by = .(periodo, oferta_tmk)][order(oferta_tmk)]
+```
+
+```{r}
+tratamiento[, .N, by = .(periodo, oferta_tmk, venta)][order(oferta_tmk)]
+```
+
+#Masters
+```{r}
+score_master_files <- data.frame(file_path = list.files(scoring_master_path))
+score_master_files <- data.table(score_master_files)
+score_master_files[, file_name := substr(score_master_files$file_path, 14, 20)]
+score_master_files[, date := paste(file_name, "01", sep = "_")]
+score_master_files[, date := as.Date(date, "%Y_%m_%d")]
+score_master_files <- score_master_files[date == "2019-06-01" ]
+
+for(i in 1:nrow(score_master_files)){
+  assign(paste0("score_master_", score_master_files[i, file_name]), 
+         readRDS(os.path.join(scoring_master_path, score_master_files[i, file_path])))
+}
+
+# score_master_2019_05[, campanas := NULL]
+# 
+# score_master <- rbind(score_master_2019_04, score_master_2019_05, score_master_2019_06)
+# 
+rm(score_master_files)
+```
+
+#Merge resultados y masters
+```{r}
+var_imp <-
+    c("definit",
+      "periodo",
+      "crm_estrato",
+      "antiguedad_cta",
+      "departamento",
+      "saldo_disponible",
+      "promedio_mes")
+
+
+
+aux <- merge(resultados, score_master[, mget(var_imp)],
+       by= "definit", all.x = T)
+
+```
+

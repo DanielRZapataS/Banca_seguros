@@ -1,0 +1,294 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("modelos_propension_compra_cuentas/scripts/files_tools.R")
+source("modelos_propension_compra_cuentas/scripts/utils.R")
+source("modelos_propension_compra_cuentas/scripts/common_reports.R")
+
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_tmk", sep = "/")
+```
+
+# gestion
+```{r}
+gestion_201906 <- get_path(gestion, "201906") %>% fread()
+gestion_201907 <- get_path(gestion, "201907") %>% fread()
+gestion_201908 <- get_path(gestion, "201908") %>% fread()
+head(gestion_201906)
+
+```
+```{r}
+unique(gestion_201906$COD_PRODUCTO_OFRECIDO)
+unique(gestion_201907$COD_PRODUCTO_OFRECIDO)
+unique(gestion_201908$COD_PRODUCTO_OFRECIDO)
+```
+```{r}
+head(gestion_201907)
+
+```
+```{r}
+unique(gestion_201907$NIVEL_2)
+```
+
+```{r}
+#### envios 201906 ####
+envio_201906 <- paste(original_path, "envios_campañas_propension/envio_campañas/ctas/cancer_673", sep = "/") %>% 
+  get_path(key_searcher = "06") %>% fread()
+names(envio_201906)
+unique(envio_201906$propension)
+head(envio_201906)
+```
+
+```{r}
+envio_201906 <- envio_201906[, .(periodo = "201906", 
+                                 definit = paste0(TIPO, IDEN), 
+                                 grupo = ifelse(propension == "CON_PROPENSION", "tratamiento", "control"))]
+envio_201906[, .N, by = grupo]
+
+```
+
+```{r}
+#### envios 201906 ####
+envio_201907_modelo <- paste(original_path, "envios_campañas_propension/envio_campañas/ctas/cancer_673", sep = "/") %>% 
+  get_path(key_searcher = "07") %>% fread()
+names(envio_201907_modelo)
+unique(envio_201907_modelo$propension)
+head(envio_201907_modelo)
+envio_201907_modelo[, .N, by  = `CANCER SIN PROPEN`  ]
+```
+```{r}
+envio_201907_all <- get_path(original_path, "envio_campañas_tmk") %>% 
+  get_path(key_searcher = "201907") %>% read.xlsx() %>% data.table()
+head(envio_201907_all)
+```
+
+```{r}
+
+envio_201907 <- envio_201907_all[Oferta == 673, .(periodo = "201907", 
+                                 definit = Definit)]
+envio_201907[,grupo := "control"]
+envio_201907[ definit %in% envio_201907_modelo[, paste0(TIPO_ID, id_cliente)], grupo := "tratamiento"]
+envio_201907[, .N, by = grupo]
+```
+```{r}
+gestion_201907[COD_PRODUCTO_OFRECIDO == 673, uniqueN(paste0(TIPO_DOCUMENTO_IDENTIDAD,NUMERO_DOCUMENTO_IDENTIDAD))]
+```
+
+```{r}
+gestion_201907_llamadas <- gestion_201907[COD_PRODUCTO_OFRECIDO == 673, .(definit =                                                paste0(TIPO_DOCUMENTO_IDENTIDAD,NUMERO_DOCUMENTO_IDENTIDAD),
+                                              FECHA_GESTION,
+                                              NIVEL_0,
+                                              NIVEL_1,
+                                              NIVEL_2)]
+names(gestion_201907_llamadas) <- tolower(names(gestion_201907_llamadas))
+gestion_201907_llamadas <- merge(gestion_201907_llamadas, envio_201907, by = "definit")
+```
+
+```{r}
+gestion_201907_llamadas[, .N, by = grupo]
+```
+```{r}
+gestion_201907_llamadas[, .N]
+```
+
+```{r}
+gestion_201907_llamadas[, .N, by = .(grupo, nivel_0)]
+```
+
+```{r}
+aux <- gestion_201907_llamadas[, .(barridos = .N), by = definit]
+aux[, .N]
+```
+
+```{r}
+aux[, venta := 0]
+aux[definit %in% gestion_201907_llamadas[nivel_2 == "Venta Cantada", definit], venta := 1]
+aux[, .N, by = venta]
+```
+
+```{r}
+aux <- merge(aux, envio_201907, by = "definit")
+aux
+```
+```{r}
+aux[, .(barriods_promedio = mean(barridos), clientes = .N), by = .(grupo, venta)][order(grupo)]
+
+```
+
+```{r}
+resultados <- paste(original_path, "resultados_tmk/resultados_ventas_tmk/cancer/resultados_cta_cancer_673_tmk_201906.csv", sep = "/") %>% fread()
+resultados[, .N]
+```
+
+### cargue nuevos registros 
+```{r}
+resultados_tmk_201906 <-  paste(original_path, "resultados_nuevos_tmk/resultados_201906.xlsx", sep = "/") %>% read.xlsx() 
+resultados_tmk_201907 <-  paste(original_path, "resultados_nuevos_tmk/resultados_201907.xlsx", sep = "/") %>% read.xlsx() 
+resultados_tmk_201906 <- data.table(resultados_tmk_201906)
+resultados_tmk_201907 <- data.table(resultados_tmk_201907)
+
+head(resultados_tmk_201906)
+class(resultados_tmk_201906)
+head(resultados_tmk_201907)
+class(resultados_tmk_201907)
+resultados_tmk_201907[, .N]
+unique(resultados_tmk_201907$Descripción.Servicio)
+
+```
+
+```{r}
+resultados_tmk_201906 <- resultados_tmk_201906[ Código.de.producto.de.seguro == "0673", .(definit = paste0(Tipo.de.documento.asegurado, Número.de.documento.asegurado))]
+
+resultados_tmk_201907 <- resultados_tmk_201907[ Descripción.Servicio == "673S", .(definit = CCCliente)]
+```
+
+```{r}
+resultados_tmk_201906[, .N]
+resultados_tmk_201907[, .N]
+```
+```{r}
+resultados_tmk_201906 <- data.table(definit = trimws(resultados_tmk_201906$definit))
+resultados_tmk_201907 <- data.table(definit = trimws(resultados_tmk_201907$definit))
+
+```
+```{r}
+envio_201906
+envio_201907[, definit1 := str_extract(definit, "[[:digit:]]+")]
+```
+
+```{r}
+resultados_201906 <- merge(resultados_tmk_201906, envio_201906, by = "definit")
+resultados_201907 <- merge(resultados_tmk_201907, envio_201907, by.x = "definit", by.y = "definit1")
+```
+
+```{r}
+resultados_201906[, .N]
+resultados_201907[, .N]
+```
+
+```{r}
+resultados_201906[, .N, by = grupo]
+```
+```{r}
+resultados_201907[, .N, by = grupo]
+```
+############## 
+
+otra base de resultadso 
+
+```{r}
+resultados_cancer_201906 <- paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/cancer/resultados_cta_cancer_673_tmk_201906.csv") %>% fread()
+
+resultados_cancer_201907 <- paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/cancer/resultados_cta_cancer_673_tmk_201907_corregido.csv") %>% fread()
+
+```
+
+
+```{r}
+resultados_cancer_201906[, .N]
+resultados_cancer_201907[, .N]
+
+```
+```{r}
+envio_201907[, definit1 := NULL]
+envio_201907[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201906[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201907[duplicated(numid)]
+envio_201906[duplicated(numid)]
+
+```
+
+```{r}
+
+envios <- rbindlist(list(envio_201906, envio_201907))
+# envios[, numid := str_extract(definit, "[[:digit:]]+")]
+resultados <- rbindlist(list(resultados_cancer_201906[, .(periodo = "201906", numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`), venta = `Reporte_Llamadas_EstadoBases[VENTAS]`)], resultados_cancer_201907[, .(periodo = "201907", numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`), venta = `Reporte_Llamadas_EstadoBases[VENTAS]`)]))
+
+resultados[, .N, by = periodo]
+```
+
+```{r}
+envio_201907[numid %!in% resultados_cancer_201907$`Reporte_Llamadas_EstadoBases[CCCliente]`]
+
+```
+
+```{r}
+envio_201906[numid %!in% resultados_cancer_201906$`Reporte_Llamadas_EstadoBases[CCCliente]`]
+
+```
+```{r}
+resultados_cancer_201906[`Reporte_Llamadas_EstadoBases[CCCliente]`  %!in% envio_201906$numid, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)]
+
+```
+
+```{r}
+resultados_cancer_201907[`Reporte_Llamadas_EstadoBases[CCCliente]`  %!in% envio_201907$numid, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)]
+
+```
+```{r}
+analisis_resultados <- merge(envios, resultados, by = c("periodo", "numid"))
+analisis_resultados[, .N, by = periodo]
+
+```
+
+```{r}
+analisis_resultados[, .N, by = .(periodo, grupo)]
+```
+
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo)]
+```
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo, grupo)]
+
+```
+```{r}
+analisis_resultados
+```
+
+```{r}
+fwrite(analisis_resultados, "salidas_cosechas/ventas_modelo.csv")
+```
+

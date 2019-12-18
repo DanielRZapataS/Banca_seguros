@@ -1,0 +1,297 @@
+---
+title: "caraterizacion_grupo_tratamiento"
+author: "Daniel Zapata"
+date: "25 de septiembre de 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("DEDGA-BS_ctas_propension_compra/scripts/files_tools.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/utils.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/common_reports.R")
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201907")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+```
+
+# envios
+```{r}
+#### envios 201906 ####
+envio_201906 <-  paste(original_path, "envios_campañas_propension/envio_campañas/ctas/cancer_673", sep = "/") %>% get_path(key_searcher = "06") %>% fread()
+names(envio_201906)
+unique(envio_201906$propension)
+head(envio_201906)
+```
+
+
+```{r}
+envio_201906 <- envio_201906[, .(periodo = "201906", 
+                                 definit = paste0(TIPO, IDEN), 
+                                 grupo = ifelse(propension == "CON_PROPENSION", "tratamiento", "control"))]
+envio_201906[, oferta_tmk_codigo := 673]
+envio_201906[, oferta_tmk := "cancer"]
+envio_201906[, .N, by = grupo]
+```
+
+```{r}
+envio_201907_modelo <- paste(original_path, "envios_campañas_propension/envio_campañas/ctas/cancer_673", sep = "/") %>% 
+  get_path(key_searcher = "07") %>% fread()
+names(envio_201907_modelo)
+unique(envio_201907_modelo$propension)
+head(envio_201907_modelo)
+envio_201907_modelo[, .N, by  = `CANCER SIN PROPEN`  ]
+```
+
+```{r}
+envio_201907_all <- get_path(original_path, "envio_campañas_tmk") %>% 
+  get_path(key_searcher = "201907") %>% read.xlsx() %>% data.table()
+envio_201907_all[, .N, Oferta]
+head(envio_201907_all)
+```
+
+```{r}
+
+envio_201907 <- envio_201907_all[Oferta == 673, .(periodo = "201907", 
+                                 definit = Definit)]
+envio_201907[,grupo := "control"]
+envio_201907[ definit %in% envio_201907_modelo[, paste0(TIPO_ID, id_cliente)], grupo := "tratamiento"]
+envio_201907[, oferta_tmk_codigo := 673]
+envio_201907[, oferta_tmk := "cancer"]
+envio_201907[, .N, by = grupo]
+head(envio_201907)
+```
+####Cargue 201908
+```{r}
+cargue_201908 <- get_path(cargue_path, "cargue_campañas_all_201907")%>%fread()
+names(cargue_201908)
+head(cargue_201908)
+unique(cargue_201908$oferta_tmk_codigo)
+summary(factor(cargue_201908$oferta_tmk_codigo))
+cargue_201908[, .N]
+```
+###Envios Campañas
+```{r}
+envios_201908 <- get_path(envios_path, "Envios_201908") %>% read.xlsx() %>%as.data.table()
+names(envios_201908)
+names(envios_201908) <- tolower(names(envios_201908))
+colnames(envios_201908)[colnames(envios_201908)=="campaña"] <- "campana"
+head(envios_201908)
+unique(envios_201908$oferta)
+summary(factor(envios_201908$oferta))  
+```
+###Envios Propensión
+```{r}
+envios_propension_201908 <- envios_201908[grepl("STOCK", campana)] %>%
+  filter(oferta == 673 | oferta == 676 | oferta == 682) %>% data.table()
+head(envios_propension_201908)
+unique(envios_propension_201908$oferta)
+summary(factor(envios_propension_201908$oferta))
+```
+```{r}
+envios_propension_201908[definit %!in% cargue_201908$definit]
+```
+
+```{r}
+envios_propension_201908 <- merge(envios_propension_201908, cargue_201908, 
+                                  by = "definit")
+envio_201908 <-
+  data.table(periodo = 201908,
+  definit = envios_propension_201908$definit,
+  grupo = envios_propension_201908$grupo,
+  oferta_tmk = envios_propension_201908$oferta_tmk,
+  oferta_tmk_codigo = envios_propension_201908$oferta_tmk_codigo)
+  
+```
+
+
+# gestion tmk 
+```{r}
+resultados_201906 <- get_path(paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/cancer") , "tmk_201906") %>% fread
+
+resultados_201907 <- get_path(paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/cancer"), "tmk_201907") %>% fread
+
+resultados_201906[, oferta_tmk_codigo:= 673]
+resultados_201907[, oferta_tmk_codigo := 673]
+resultados_201906[, oferta_tmk := "cancer"]
+resultados_201907[, oferta_tmk := "cancer"]
+
+resultados_cancer_201908 <- get_path(paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/cancer"), "tmk_201908") %>% fread
+resultados_pif_201908 <- get_path(paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/pif"), "tmk_201908") %>% fread
+resultados_fraude_201908 <- get_path(paste0(original_path, "/resultados_tmk/resultados_ventas_tmk/fraude"), "tmk_201908") %>% fread
+resultados_cancer_201908[, oferta_tmk_codigo := 673]
+resultados_pif_201908[, oferta_tmk_codigo := 676]
+resultados_fraude_201908[, oferta_tmk_codigo := 682]
+
+resultados_cancer_201908[, oferta_tmk := "cancer"]
+resultados_pif_201908[, oferta_tmk := "pif"]
+resultados_fraude_201908[, oferta_tmk := "fraude"]
+
+
+resultados_201907[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+resultados_201906[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+resultados_cancer_201908[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+resultados_fraude_201908[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+resultados_pif_201908[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+
+```
+
+```{r}
+resultados_201908 <-
+  rbindlist(list(
+  resultados_cancer_201908,
+  resultados_fraude_201908,
+  resultados_pif_201908
+  ))
+resultados_201908[, .N, oferta_tmk]
+```
+
+```{r}
+envio_201907[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201906[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201908[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201907[duplicated(numid)]
+envio_201906[duplicated(numid)]
+envio_201908[duplicated(numid)]
+
+```
+
+
+```{r}
+envios <- rbindlist(list(envio_201906, envio_201907, envio_201908), use.names = T)
+# score <- rbindlist(list(score_201906, score_201907))
+resultados <-
+  rbindlist(list(resultados_201906[, .(
+  periodo = "201906",
+  numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`),
+  venta = `Reporte_Llamadas_EstadoBases[VENTAS]`,
+  oferta_tmk_codigo = oferta_tmk_codigo,
+  oferta_tmk = oferta_tmk
+  )], resultados_201907[, .(
+  periodo = "201907",
+  numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`),
+  venta = `Reporte_Llamadas_EstadoBases[VENTAS]`,
+  oferta_tmk_codigo = oferta_tmk_codigo,
+  oferta_tmk = oferta_tmk
+    )], resultados_201908[, .(
+  periodo = "201908",
+  numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`),
+  venta = `Reporte_Llamadas_EstadoBases[VENTAS]`,
+oferta_tmk_codigo = oferta_tmk_codigo,
+  oferta_tmk = oferta_tmk  )]))
+envios[, .N, by = .(periodo, oferta_tmk) ]
+resultados[, .N, by = .(periodo, oferta_tmk) ]
+```
+existen diferenciaas para el cproducto de cuentas cancer en julio entre los clientes que manda el banco (25803) y los que reporta el call que gestionaron (25678)
+```{r}
+names(resultados_201906)
+```
+
+
+```{r}
+envio_201907[numid %!in% resultados_201907$`Reporte_Llamadas_EstadoBases[CCCliente]`]
+```
+
+```{r}
+resultados_201907[`Reporte_Llamadas_EstadoBases[CCCliente]`  %!in% envio_201907$numid, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)]
+```
+
+```{r}
+nrow(resultados_201907) - nrow(envio_201907)
+```
+```{r}
+resultados_201908[`Reporte_Llamadas_EstadoBases[CCCliente]`  %!in% envio_201908$numid, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)]
+```
+
+
+
+# Resultados de la campaña de seguros cuentas cancer 
+
+
+## registros 
+en el mes de julio se mandaron 25803 registros para la bventa de seguros de cuentas cancer 673, sin embargo no encontramos información para 126, aunque la gestion nos envio los resultados para 27064 de los cuales 1387 no pertenecen a la base enviada (los 25803).
+```{r}
+analisis_resultados <- merge(envios, resultados, by = c("periodo", "numid", "oferta_tmk_codigo", "oferta_tmk"))
+analisis_resultados[, .N, by = .(periodo, oferta_tmk)]
+```
+## división por grupo control y tratamiento 
+```{r}
+analisis_resultados[, .N, by = .(periodo, oferta_tmk,grupo)]
+```
+
+## efectividad de la campaña en los dos meses diferenciando por modelo
+
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo, oferta_tmk)]
+```
+
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo, oferta_tmk, grupo)][order(periodo, oferta_tmk)]
+```
+```{r}
+
+analisis_resultados
+```
+
+```{r}
+fwrite(analisis_resultados, "DEDGA-BS_ctas_propension_compra/resultados/caracterizacion_clientes/resumen_gestion_modelo_201906_201908.csv")
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+

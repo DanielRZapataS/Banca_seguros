@@ -1,0 +1,467 @@
+---
+title: "Estimaciones efectividad"
+author: "Daniel Zapata"
+date: "26 de septiembre de 2019"
+output: html_document
+---
+* Comparación ventas vs. emisión
+* Corrección de deciles por los cortes de test 
+* Comparación tasas de eectidada esperadas y observadas e intervalos de confianza
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r include=FALSE}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+```
+
+```{r include=FALSE}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201907")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+```
+# Comparación tasas de efectividad medidas por ventas y emisiones
+
+### resumen de la gestión de los cliente 
+```{r include=FALSE}
+resumen_clientes <- get_path("resultados/caracterizacion_clientes", "201908") %>%  fread()
+resumen_clientes[, .N, by = .(periodo, oferta_tmk_codigo, venta)]
+```
+### emisiones 
+```{r include=FALSE}
+i = 1
+emisiones_files <- list.files(emisions_path, full.names = T)
+emisiones <- list()
+for(i in 1:length(emisiones_files)){
+  emisiones[[i]] <- fread(emisiones_files[i])
+  # emisiones[[i]][, periodo := gsub(pattern = "_", replacement = "", str_sub(emisiones_files[i], -11, -5))]
+}
+emisiones <- rbindlist(emisiones)
+emisiones[, periodo := substr(FechaProceso, 1, 6)]
+emisiones <- emisiones[CodProdSeguro %in% c(673, 682, 676), .(periodo, oferta_tmk_codigo = CodProdSeguro, definit = paste0(TipoDocAsegurado, NumDocAsegurado))]
+emisiones[, .N, by = .(periodo, oferta_tmk_codigo)]
+emisiones[, emision := 1]
+```
+
+
+###  campaña de agosto 
+```{r echo=FALSE}
+cargue_201907 <- get_path(cargue_path, "cargue_campañas_all_201907")%>%fread()
+
+cargue_201907[, .N, by = .(oferta_tmk, grupo)]
+```
+
+```{r include=FALSE}
+cargue_201907 <-
+  cargue_201907[, .(
+  definit,
+  periodo,
+  pred_cancer,
+  decil_cancer,
+  pred_pif,
+  decil_pif,
+  pred_fraude,
+  decil_fraude,
+  producto_1,
+  producto_2,
+  producto_3,
+  tenencia_pif_credito,
+  tenencia_fraude,
+  tenencia_pif,
+  tenencia_cancer,
+  edad,
+  viabilidad_fraude,
+  viabilidad_cancer,
+  viabilidad_pif,
+  oferta_tmk,
+  grupo,
+  oferta_tmk_codigo
+  )]
+cargue_201907[oferta_tmk == "pif", ':='(pred_oferta = pred_pif, decil_oferta = decil_pif)] 
+cargue_201907[oferta_tmk == "cancer", ':='(pred_oferta = pred_cancer, decil_oferta = decil_cancer)] 
+cargue_201907[oferta_tmk == "fraude", ':='(pred_oferta = pred_fraude, decil_oferta = decil_fraude)] 
+```
+
+```{r include=FALSE}
+resumen_clientes
+cargue_201907
+```
+* cuando hay emisión pero no venta significa que la venta posiblemente fue hecha el me spasado (t-1)
+
+* Cuando hay enta pero o emisión, son todos aquellos cliente que por alguna razón no se le spudo emitir. (Cierre de productos, no cumplimiento de las condiciones d ela póliza.)
+
+```{r}
+ventas_emisiones <- merge(resumen_clientes,
+                          emisiones, by = c("definit", "oferta_tmk_codigo"), all.x = T)
+ventas_emisiones[is.na(emision), emision := 0]
+ventas_emisiones[, .N, by = .(periodo.x, oferta_tmk, venta, emision)][order(periodo.x, oferta_tmk)]
+```
+
+### distribucion por decil de los grupos de tratamiento y control para agosto 
+
+Dado el diseño de la oferta en agosto, hay translape en deciles altos  entre los grupos.
+```{r echo=FALSE}
+resultado_modelo_201908 <- resumen_clientes[periodo == 201908]
+resultado_modelo_201908[, .N, by = .(oferta_tmk_codigo)]
+resultado_modelo_201908 <-
+  merge(resultado_modelo_201908,
+  cargue_201907[, .(definit, oferta_tmk, pred_oferta, decil_oferta)],
+  by = c("definit", "oferta_tmk"))
+resultado_modelo_201908 <- merge(resultado_modelo_201908, emisiones[, -"periodo"], by = c("oferta_tmk_codigo", "definit"), all.x = T)
+resultado_modelo_201908[is.na(emision), emision := 0]
+resultado_modelo_201908[, decil_oferta := factor(decil_oferta, levels = paste0("decil_", 1:10), ordered = T)]
+resultado_modelo_201908[, .N, by = .(oferta_tmk)]
+resultado_modelo_201908[, .N, by = .(oferta_tmk,grupo, decil_oferta)][order(oferta_tmk, grupo, decil_oferta)]
+  
+```
+Hay gente de deciles altos tanto en tratamiento y control. es mejor evaluar solo por decil 
+
+## tasas de efectividad ventas vs. emisiones
+```{r echo=FALSE}
+aux_plot <- resultado_modelo_201908[, .(
+  clientes = .N,
+  ventas = sum(venta),
+  emisiones = sum(emision),
+  efectividad_venta = sum(venta) / .N,
+  efectividad_emision = sum(emision) / .N
+  ), by = .(oferta_tmk, decil_oferta)][order(oferta_tmk,  decil_oferta)]
+aux_plot
+```
+
+```{r echo=FALSE}
+ggplot(data = aux_plot, aes(y = efectividad_venta, x = efectividad_emision, group= oferta_tmk))+
+         geom_line( aes(color = oferta_tmk)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1)
+```
+No hay mucha diferencia entre la efectividad medida por ventas o por emisiones. 
+
+## efectividades agregadas entre venta y emision
+```{r echo=FALSE}
+resultado_modelo_201908[, .(
+  clientes = .N,
+  ventas = sum(venta),
+  emisiones = sum(emision),
+  efectividad_venta = sum(venta) / .N,
+  efectividad_emision = sum(emision) / .N
+  ), by = .(oferta_tmk)][order(oferta_tmk)]
+  
+```
+## uplift ventas vs. emisiones
+```{r echo=FALSE}
+aux <-
+resultado_modelo_201908[, .(
+efectividad_total_venta = sum(venta) / .N,
+efectividad_total_emisiones = sum(emision) / .N
+), by = .(oferta_tmk)][order(oferta_tmk)]
+
+aux1 <-
+resultado_modelo_201908[, .(
+clientes = .N,
+  ventas = sum(venta),
+  emisiones = sum(emision),
+  efectividad_venta = sum(venta) / .N,
+  efectividad_emision = sum(emision) / .N
+), by = .(oferta_tmk, decil_oferta)][order(oferta_tmk,  decil_oferta)]
+aux2 <- merge(aux1, aux, by = "oferta_tmk")
+aux2[, uplift_ventas := efectividad_venta / efectividad_total_venta]
+aux2[, uplift_emisiones := efectividad_emision / efectividad_total_emisiones]
+aux2[, .(oferta_tmk, decil_oferta, clientes, ventas, emisiones, uplift_ventas, uplift_emisiones)]
+```
+
+```{r echo=FALSE}
+ggplot(data = aux2, aes(y = uplift_ventas, x = uplift_emisiones, group= oferta_tmk))+
+         geom_line( aes(color = oferta_tmk)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1)
+```
+
+Las diferencias entre emisiones y ventas no son muy grandes en uplift. 
+
+# tasas de efectividad esperada vs tasa de efectividad de la campaña
+* A partir de ahora se usaran los tados de emisiones
+* Modelo hecho en Julio para el scoreo de agosto 
+* test de este modelo es mayo prediciendo junio, se predice la compra en julio
+de los clientes con datos de junio y se gestionan en agosto
+
+```{r include=FALSE}
+#### paths ####
+#results_path <- "propension_compra/cuentas_ahorro"
+models_path <-  "propension_compra/model_selection/"
+cancer_path <- get_path(models_path, "prueba_20190717_cancer")
+pif_path <- get_path(models_path, "prueba_20190717_pif")
+fraude_path <- get_path(models_path, "prueba_20190717_fraude")
+file_name <- "pred_test"
+```
+Como el modleo que se uso para la cam´paña de agosto se hace en julio, utiliza
+la data caida a junio. este modelo utiliza las emisiones en junio como target
+prediciendo con los datos de mayo para los datos de test.
+
+```{r include=FALSE}
+##### load results ####
+cancer_pred_test <- get_path(cancer_path, file_name) %>% fread()
+pif_pred_test <- get_path(pif_path, file_name) %>% fread()
+fraude_pred_test <- get_path(fraude_path, file_name) %>% fread()
+```
+
+```{r include=FALSE}
+cancer_pred_test[, decil := cut(
+    xgb_auc_pred,
+    quantile(xgb_auc_pred, probs = seq(0, 1, by = 0.1)),
+    labels = paste0("decil_", seq(1, 10, by = 1)),
+    include.lowest = TRUE
+  )]
+cancer_pred_test[, product := "cancer"]
+pif_pred_test[, decil := cut(
+    xgb_auc_pred,
+    quantile(xgb_auc_pred, probs = seq(0, 1, by = 0.1)),
+    labels = paste0("decil_", seq(1, 10, by = 1)),
+    include.lowest = TRUE
+  )]
+pif_pred_test[, product := "pif"]
+
+fraude_pred_test[, decil := cut(
+    xgb_auc_pred,
+    quantile(xgb_auc_pred, probs = seq(0, 1, by = 0.1)),
+    labels = paste0("decil_", seq(1, 10, by = 1)),
+    include.lowest = TRUE
+  )]
+fraude_pred_test[, product := "fraude"]
+
+product_test <- rbindlist(list(cancer_pred_test, pif_pred_test, fraude_pred_test))
+vars <- c("definit", "periodo", "target", "xgb_auc_pred", "xgb_auc_pred_num", "decil", "product")
+product_test <- product_test[, mget(vars)]
+product_test
+```
+
+### dsitribución de probabilidades por decil 
+* en cancer observamos que desde deciles más inferiores aumenta la probabilidad de compra. 
+* Fraude y pif tiene un comportamiento similar en el que exeptiendo el decil 10 
+no hay varianza entre las las probabilidades y las probabilidades empiezan aumentar en lso ultimos deciles. 
+```{r}
+ggplot(product_test, aes(x = decil, y = xgb_auc_pred)) +
+  geom_boxplot() +
+  facet_grid(  product ~ ., scales = "free") +
+  scale_y_continuous(limits = c(0, 0.15))
+  
+```
+
+# resumen de score por deciles 
+esta tabla nos ayuda a determinar los cortes de probabilidad parea trasponer las tasas de efectidad esperadas por decil y cortar los deciles en la campaña.
+```{r echo=FALSE}
+deciles_test <-  product_test[, .(clientes_test = .N, efectividad_test = sum(target)/.N, score_max = max(xgb_auc_pred), score_min = min(xgb_auc_pred)), by = .(product, decil)][order(product, decil)]
+deciles_test[, score_min_ajust := shift(score_max, -1, 0, "lead"), by = .(product)]
+deciles_test
+```
+los limites de propabilidades para cada decil son los que debo usar sobre la poblacion de la campaña 
+
+### Distribución de la campaña por decil 
+* Recordemos que agosto debe verse por decil y no por grupo de tratamiento control debido al tranlape de clientes por deciles en ambos grupos.
+
+
+```{r echo=FALSE}
+# la variable decil oferta de esta tabla esta mñl ya que fue calculada sobre la
+# muestra y no usando los limites que vienen de los datos de test.
+resultado_modelo_201908[, decil_oferta := NULL]
+for(i in 1:nrow(deciles_test)){
+  
+  resultado_modelo_201908[oferta_tmk == deciles_test$product[i] &
+  pred_oferta > deciles_test$score_min_ajust[i] &
+  pred_oferta <= deciles_test$score_max[i], decil := deciles_test$decil[i]]
+}
+resultado_modelo_201908[is.na(decil), decil := "decil_10"]
+  
+resultado_modelo_201908[, .N, by = .(oferta_tmk, decil)]
+```
+
+
+```{r include=FALSE}
+decil_agosto <- resultado_modelo_201908[, .(clientes_agosto = .N,
+                            efectividad_agosto = sum(emision) / .N), 
+                        by = . (oferta_tmk, decil)][order(oferta_tmk, decil)]
+                            
+decil_test_agosto <- merge(decil_agosto, deciles_test[, .(product, decil, clientes_test, efectividad_test)], by.x = c("oferta_tmk", "decil"), by.y = c("product", "decil"), all = T  )
+```
+
+## tasas de efectividad esperada (test 05-06) vs observada en la campaña de agosto
+```{r echo=FALSE}
+
+ggplot(data = decil_test_agosto, aes(y = efectividad_agosto, x = efectividad_test, group= oferta_tmk))+
+         geom_line( aes(color = oferta_tmk)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1)
+```
+* En general en los ultimos deciles el modelo de cancer sobre estima la efecividad de los ultimos deciles excepto en el decil 10.
+
+* Los demas productos sub estiman la tasa de efectividad pero las diferencias no son tan criticas, exceptuando para el ultimo decil de pif.
+
+
+# comparacion de distribuciones test y agosto
+```{r include=FALSE}
+product_test[, .N, by = .(product, decil)]
+```
+
+```{r echo=FALSE}
+resultado_modelo_201908[, .N, by = .(oferta_tmk, decil)]
+```
+* La distribución de clientes por decil en los productos no es uniforme lo que afecta el contraste de tasas de efectividad esperadas.
+```{r include=FALSE}
+plot_dist <- rbindlist(
+  list(
+    product_test[ , .(tipo = "test", oferta_tmk = product, decil, pred = xgb_auc_pred)],
+    resultado_modelo_201908[, .(tipo = "agosto" , oferta_tmk, decil, pred = pred_oferta)]
+  )
+)
+```
+
+```{r echo=FALSE}
+ggplot(plot_dist, aes(x = pred, fill = tipo)) + 
+  geom_density(alpha = .3) +
+  facet_grid(  oferta_tmk ~ ., scales = "free")
+```
+Las distribuciones parecen ser muy distintas entre test y la campaña de agosto
+
+### population stable index
+
+Las distribucion de probailidad de la poblacion en test y la campaña estan muy alejadas entre sí. 
+```{r echo=FALSE}
+psi <- decil_test_agosto[, .(oferta_tmk, decil, clientes_test, clientes_agosto)]
+psi[, diferencia := clientes_test - clientes_agosto]
+psi[, proporcion := log(clientes_test/clientes_agosto) ]
+psi[, .(psi = sum(diferencia*proporcion)), by = oferta_tmk]
+```
+Las poblaciones son muy distintas. 
+```{r include=FALSE}
+product_test[, .N, by = product]
+```
+
+```{r include=FALSE}
+product_test[, .N, by = .(product, decil)]
+```
+
+## distribution by decil 
+
+
+
+# intervalos de confianza 
+```{r include=FALSE}
+set.seed(123)
+i = 1
+bagging_list <- list()
+for(i in 1:10000){
+  
+  aux <- product_test[, sample(definit, .N*0.1), by = .(product, decil)]
+  aux[, .N, by = .(product, decil)]
+  aux1 <- product_test[definit %in% aux$V1, .( efectividad_test = sum(target)/.N, .N), by = .(product, decil)][order(product, decil)]
+  aux1[, var := paste(product, decil, sep = "_")]
+  bagging_list[[i]] <-  dcast(aux1[, .(efectividad_test, var)], .~var, value.var = "efectividad_test")
+}
+```
+
+
+
+```{r echo=FALSE}
+bagging_results <- rbindlist(bagging_list, use.names = T)
+bagging_results[, . := NULL]
+bagging_results <- bagging_results[, lapply(.SD, function(x){quantile(x, c(.05, .95))} )]
+bagging_results[1, percentil := "confidence_5" ]
+bagging_results[2, percentil := "confidence_95" ]
+bagging_results <- melt(bagging_results)
+bagging_results[grep(pattern = "cancer", variable), oferta_tmk := "cancer"] 
+bagging_results[grep(pattern = "fraude", variable), oferta_tmk := "fraude"] 
+bagging_results[grep(pattern = "pif", variable), oferta_tmk := "pif"] 
+bagging_results[, decil := variable]
+bagging_results[, decil := gsub(pattern = "cancer_|fraude_|pif_", "", decil)]
+bagging_results[, variable := NULL]
+bagging_results <- dcast(bagging_results, oferta_tmk + decil ~ percentil, value.var = "value")
+decil_test_agosto_int <- merge(decil_test_agosto, bagging_results, by = c("oferta_tmk", "decil"))
+decil_test_agosto_int[, decil := factor(decil, levels = paste0("decil_", 1:10), ordered = T)]
+decil_test_agosto_int[, prueba_prediccion := ifelse(efectividad_agosto > confidence_5 & efectividad_agosto < confidence_95, 1, 0)]
+decil_test_agosto_int[order(oferta_tmk, decil)]
+```
+
+```{r echo=FALSE}
+aux <- decil_test_agosto_int[oferta_tmk == "cancer"][order(oferta_tmk, decil)]
+aux[, decil_num := 1:10]
+
+ggplot(data = aux, aes(x = decil_num, y = efectividad_test, ymin = confidence_5, ymax = confidence_95)) + 
+    geom_point(color = "blue") + 
+    geom_ribbon(alpha = .3) +
+  geom_point( aes(y = efectividad_agosto), colour = "green") +
+   scale_x_discrete(limits = 1:10) +
+  labs(title = "Resultados modelo cancer vs campaña agosto",
+       x = "Decil de probabilidad",
+       y = "Efectividad")
+  
+```
+
+```{r echo=FALSE}
+aux <- decil_test_agosto_int[oferta_tmk == "pif"][order(oferta_tmk, decil)]
+aux[, decil_num := 1:10]
+
+ggplot(data = aux, aes(x = decil_num, y = efectividad_test, ymin = confidence_5, ymax = confidence_95)) + 
+    geom_point(color = "blue") + 
+    geom_ribbon(alpha = .3) +
+  geom_point( aes(y = efectividad_agosto), colour = "green") +
+   scale_x_discrete(limits = 1:10) +
+  labs(title = "Resultados modelo pif vs campaña agosto",
+       x = "Decil de probabilidad",
+       y = "Efectividad")
+  
+```
+
+```{r echo=FALSE}
+aux <- decil_test_agosto_int[oferta_tmk == "fraude"][order(oferta_tmk, decil)]
+aux[, decil_num := 1:10]
+
+ggplot(data = aux, aes(x = decil_num, y = efectividad_test, ymin = confidence_5, ymax = confidence_95)) + 
+    geom_point(color = "blue") + 
+    geom_ribbon(alpha = .3) +
+  geom_point( aes(y = efectividad_agosto), colour = "green") +
+   scale_x_discrete(limits = 1:10) +
+  labs(title = "Resultados modelo fraude vs campaña agosto",
+       x = "Decil de probabilidad",
+       y = "Efectividad")
+```
+
+
+
+
+
+

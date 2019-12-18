@@ -1,0 +1,134 @@
+---
+title: "analisis_barridos_julio"
+author: "Daniel Zapata"
+date: "23 de septiembre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("modelos_propension_compra_cuentas/scripts/files_tools.R")
+source("modelos_propension_compra_cuentas/scripts/utils.R")
+source("modelos_propension_compra_cuentas/scripts/common_reports.R")
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+```
+
+```{r}
+#### envios 201906 ####
+envio_201907_modelo <- paste(original_path, "envios_campañas_propension/envio_campañas/ctas/cancer_673", sep = "/") %>% 
+  get_path(key_searcher = "07") %>% fread()
+names(envio_201907_modelo)
+unique(envio_201907_modelo$propension)
+head(envio_201907_modelo)
+envio_201907_modelo[, .N, by  = `CANCER SIN PROPEN`  ]
+```
+
+```{r}
+envio_201907_all <- get_path(original_path, "envio_campañas_tmk") %>% 
+  get_path(key_searcher = "201907") %>% read.xlsx() %>% data.table()
+head(envio_201907_all)
+```
+
+```{r}
+
+envio_201907 <- envio_201907_all[Oferta == 673, .(periodo = "201907", 
+                                 definit = Definit)]
+envio_201907[,grupo := "control"]
+envio_201907[ definit %in% envio_201907_modelo[, paste0(TIPO_ID, id_cliente)], grupo := "tratamiento"]
+envio_201907[, .N, by = grupo]
+```
+
+```{r}
+gestion_201907 <- get_path(gestion, "201907") %>% fread()
+names(gestion_201907) <- tolower(names(gestion_201907))
+head(gestion_201907)
+```
+
+```{r}
+unique(gestion_201907$cod_producto_ofrecido)
+```
+```{r}
+gestion_201907[, .N, by =cod_producto_ofrecido ]
+```
+
+```{r}
+nivel_vars <- grep("nivel", names(gestion_201907), value = T)
+gestion_201907[, unique(.SD), .SDcols = nivel_vars][order(nivel_0, nivel_1)]
+```
+```{r}
+gestion_201907 <- gestion_201907[cod_producto_ofrecido == 673, .(definit = paste0(tipo_documento_identidad,
+                                                      numero_documento_identidad),
+                                     nivel_2,
+                                     nombre_departamento,
+                                     nombre_ciudad,
+                                     fecha_gestion,
+                                     hora_gestion
+                                     )]
+gestion_201907[, venta := ifelse(nivel_2 == "Venta Cantada", 1, 0)]
+gestion_201907[, .N, by = venta]
+
+```
+# marcacion clientes con y sin modelo
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

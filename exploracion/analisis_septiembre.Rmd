@@ -1,0 +1,241 @@
+---
+title: "Análisis Septiembre"
+author: "Paula Quintana"
+date: "15 de octubre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("DEDGA-BS_ctas_propension_compra/scripts/files_tools.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/utils.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/common_reports.R")
+
+```
+
+```{r}
+info_path <- "Z:/Informacion_Centralizada/Data_Analytics/"
+root_path <- "Y:/"
+
+original_path <- os.path.join(root_path, "datos/original")
+emisiones_path <- os.path.join(original_path, "emisiones_tmk")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201908")
+envios_path <- os.path.join(original_path, "envio_campañas_tmk")
+resultados_ventas_path <- os.path.join(original_path, "resultados_tmk/resultados_ventas_tmk")
+ventas_path <- os.path.join(original_path, "resultados_tmk/ventas_tmk")
+scoring_master_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/datos/master/master_scoring")
+models_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/propension_compra")
+results_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/resultados")
+```
+
+#Cargue
+Es la oferta que Analytics envía a Campañas para su posterior envío para la campaña de septiembre
+```{r}
+cargue_201909 <- get_path(cargue_path, "cargue_campañas_all_201908")%>%fread()
+names(cargue_201909)
+head(cargue_201909)
+unique(cargue_201909$oferta_tmk_codigo)
+summary(factor(cargue_201909$oferta_tmk_codigo))
+```
+
+#Envios
+##Envios Campañas
+Es el envío efectivo de Campañas para la gestión del TMK en el mes de septiembre
+```{r}
+envios_201909 <- get_path(envios_path, "Envios_201909")%>%
+  read.xlsx()%>%as.data.table()
+names(envios_201909)
+names(envios_201909) <- tolower(names(envios_201909))
+#Se pasan los nombres de las variables a minúscula
+colnames(envios_201909)[colnames(envios_201909)=="campaña"] <- "campana"
+head(envios_201909)
+unique(envios_201909$oferta)
+summary(factor(envios_201909$oferta))  
+```
+
+###Envios Propensión
+Se filtra el total de envíos de campañas por la campaña de stock y los tres productos de interés
+```{r}
+envios_propension_201909 <- as.data.table(envios_201909[grepl("STOCK", campana)] %>%filter(oferta == 673 | oferta == 676 | oferta == 682))
+head(envios_propension_201909)
+unique(envios_propension_201909$campana)
+unique(envios_propension_201909$oferta)
+summary(factor(envios_propension_201909$oferta))
+```
+
+Se cruzan los envíos con la oferta cargada por Analytics a Campañas para conocer la marcación de modelo o no para los clientes. Se pierde un cliente que está mal marcado en envíos (definit== "1582C", enviado para el producto 682), y no aparece en el cargue
+```{r}
+length(setdiff(cargue_201909$definit, envios_propension_201909$definit))
+```
+
+```{r}
+envios_propension_201909 <- as.data.table(merge(cargue_201909, envios_propension_201909, by = "definit"))
+```
+
+```{r}
+envios_propension_201909[definit %in% cargue_201909$definit]
+```
+
+```{r}
+envios_propension_201909[, .(registros = .N), by = .(oferta_tmk_codigo)][order(oferta_tmk_codigo)]
+```
+
+```{r}
+envios_propension_201909[, .(registros = .N), by = .(grupo)][order(grupo)]
+```
+
+```{r}
+envios_propension_201909[, .(registros = .N), by = .(grupo, oferta_tmk_codigo)][order( oferta_tmk_codigo)]
+```
+
+##Ventas
+Se cargan los unos de las ventas marcadas por el tmk para septiembre (faltan los 0)
+```{r}
+ventas_201909 <- get_path(ventas_path, "ventas_tmk_201909")%>%
+  read.xlsx()%>%as.data.table()
+names(ventas_201909)
+names(ventas_201909) <- tolower(names(ventas_201909))
+names(ventas_201909) <- gsub("[.]", "_", names(ventas_201909))
+#Se remplazan los puntos de los nombres de las variables por _, para mantener, formatos
+names(ventas_201909) <- stri_trans_general(names(ventas_201909),"Latin-ASCII")
+#Para evitar caracteres especiales como las tildes
+unique(ventas_201909$descripcion_servicio)
+ventas_201909 <- as.data.table(ventas_201909%>%
+  filter(str_detect(descripcion_servicio, "S") & str_detect(descripcion_servicio, paste(c(673, 676, 682), collapse = '|'))))
+#Se filtran las ventas por los codigos de prodcutos acompañados por s (que referencian a la campaña de stock) y los tres prodcutos de interes
+ventas_201909$descripcion_servicio <- gsub("S", "", ventas_201909$descripcion_servicio)
+#Se elimina la s para dejar solo el codigo de los productos
+ventas_201909$descripcion_servicio <- as.integer( ventas_201909$descripcion_servicio)
+#Se cambia la clase de la oferta para poder cruzar con el codigo de oferta de envíos
+unique(ventas_201909$descripcion_servicio)
+summary(factor(ventas_201909$descripcion_servicio))
+#El conteo de ventas no cuadra con el número de ventas reportado en los historicos de septiembre para PIF 676 y fraude 682
+  colnames(ventas_201909)[colnames(ventas_201909)=="cccliente"] <- "num_id"
+#Se cambia el nombre para que coincida el num_id con el de envíos
+```
+
+Se compara cuantos id de clientes que se encuentran en los envios, también se encuentran en las ventas marcadas por el tmk; donde de las 5674 ventas totales de los tres productos, coinciden 5416 id
+```{r}
+envios_propension_201909[num_id %in% ventas_201909$num_id]
+```
+También se compara cuantos id de clientes que se encuentran en las ventas, NO se encuentran en las ventas marcadas por el tmk; donde de las 5674 ventas totales de los tres productos, hay 258 ids que estaban en ventas pero no en los envios
+```{r}
+ventas_201909[num_id %!in% envios_propension_201909$num_id]
+inconsistencias <- ventas_201909[num_id %!in% envios_propension_201909$num_id]
+```
+```{r}
+inconsistencias[num_id %in% cargue_201909$num_id]
+```
+
+```{r}
+envios_propension_201909[num_id %in% ventas_201909$num_id]
+```
+
+##Ventas por id del cliente y oferta
+Se cruzan los envios con las ventas marcadas para hacer la diferenciación de grupos tratamiento y control en ventas, teniendo en cuenta que se cruce según id y que el producto ofrecido haya sido el mismo al vendido
+```{r}
+venta_cruzada_201909 <- merge(envios_propension_201909, ventas_201909[, c("descripcion_cierre_tipificacion", "descripcion_servicio", "num_id")], by.x = c("num_id", "oferta_tmk_codigo" ), by.y = c( "num_id", "descripcion_servicio"), all.x = T)
+venta_cruzada_201909[, venta:= ifelse(is.na(descripcion_cierre_tipificacion), 
+                                0, 1)]
+venta_cruzada_201909[, descripcion_cierre_tipificacion:= NULL]
+```
+
+Inicialmente se observan las ventas y registros "enviados", para cada uno de los tres productos
+```{r}
+venta_cruzada_201909[, .(ventas = sum(venta), registros = .N), by = .(oferta)][order(oferta)]
+```
+Luego, se diferencian las ventas y registros por control y tratamiento para cada uno de los tres productos
+```{r}
+venta_cruzada_201909[, .N, by = .(grupo, venta, oferta_tmk_codigo)][order(oferta_tmk_codigo, grupo)]
+```
+Se realiza el cálculo de la efectividad para los tres productos
+```{r}
+venta_cruzada_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo)][order(oferta_tmk_codigo)]
+```
+
+Se diferencia la efectividad entre grupo tratamiento y control
+```{r}
+venta_cruzada_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(grupo)]
+```
+
+Para así, hacer la diferenciación de las tasas tanto para cada uno de los tres productos como por grupos
+```{r}
+venta_cruzada_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo, grupo)][order(oferta_tmk_codigo)]
+```
+
+##Ventas por id de cliente
+Se cruzan los envios con las ventas marcadas para hacer la diferenciación de grupos tratamiento y control en ventas, teniendo en cuenta que se cruce según id tanto en los registros enviados y los registros gestionados
+```{r}
+ventas_id_201909 <- merge(envios_propension_201909, ventas_201909[, c("descripcion_cierre_tipificacion", "descripcion_servicio", "num_id")], by = "num_id", all.x = T)
+ventas_id_201909[, venta:= ifelse(is.na(descripcion_cierre_tipificacion), 0, 1)]
+ventas_id_201909[, descripcion_cierre_tipificacion:= NULL]
+```
+
+```{r}
+ventas_id_201909[, descripcion_servicio:= ifelse(is.na(descripcion_servicio), 
+                                oferta, descripcion_servicio)]
+```
+
+```{r}
+ventas_id_201909[, .(ventas = sum(venta), registros = .N), by = .(oferta)][order(oferta)]
+```
+Luego, se diferencian las ventas y registros por control y tratamiento para cada uno de los tres productos
+```{r}
+ventas_id_201909[, .N, by = .(grupo, venta, oferta_tmk_codigo)][order(oferta_tmk_codigo, grupo)]
+```
+Se realiza el cálculo de la efectividad para los tres productos
+```{r}
+ventas_id_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo)][order(oferta_tmk_codigo)]
+```
+
+Se diferencia la efectividad entre grupo tratamiento y control
+```{r}
+ventas_id_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(grupo)]
+```
+
+Para así, hacer la diferenciación de las tasas tanto para cada uno de los tres productos como por grupos
+```{r}
+ventas_id_201909[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo, grupo)][order(oferta_tmk_codigo)]
+```
+
+```{r}
+vars <- c("num_id", "oferta_tmk_codigo", "definit", "oferta_real", "grupo", "venta")
+
+venta_federico <- ventas_id_201909[, mget(vars)]
+venta_federico <- venta_federico[, periodo:= "201909"]
+fwrite(venta_federico, "//bdbemcfs/Banca_Seguros_Analytics/salidas_cosechas/ventas_septiembre.csv")
+
+```
+
+```{r}
+vars <-c("descripcion_servicio", "num_id")
+inconsistencias_federico <- inconsistencias[, mget(vars)]
+inconsistencias_federico <- inconsistencias_federico[, periodo:= "201909"]
+fwrite(inconsistencias_federico, "//bdbemcfs/Banca_Seguros_Analytics/salidas_cosechas/inconsistencias_septiembre.csv")
+```
+

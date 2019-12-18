@@ -1,0 +1,332 @@
+---
+title: "Base clientes seguros"
+author: "Daniel Zapata"
+date: "21 de marzo de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+'%!in%' <<-  Negate('%in%')
+```
+
+# Load packages
+```{r, include=FALSE}
+library(data.table)
+library(readxl)
+library(stringr)
+library(ggplot2)
+library(lubridate)
+library(naniar)
+library(scales)
+library(GGally)
+library(ggridges)
+library(stringi)
+```
+# import external functions
+```{r include=FALSE}
+source("exploracion/files_tools.R")
+```
+
+```{r include=FALSE}
+original_path <- "datos/original"
+crm_path <- get.path(original_path, "crm")
+crm_path
+```
+
+```{r include=FALSE}
+crm <-
+  get.path(crm_path, get_month(2)) %>% 
+  fread(colClasses = "character", na.strings = c("", "NA"))
+names(crm) <- tolower(names(crm))  
+```
+
+```{r include=FALSE}
+names(crm)
+```
+
+```{r include=FALSE}
+# fechas
+crm[, periodo := paste0(periodo, "01")]
+crm[, periodo := as.Date(periodo, "%Y%m%d")]
+dates <- grep("fecha", names(crm), value = T)
+crm[,(dates):= lapply(.SD, as.Date), .SDcols = dates]
+```
+
+```{r include=FALSE}
+dictionary_path <- get.path(original_path, "diccionarios")
+dicc_segmentos <- get.path(dictionary_path, "segmento") %>% 
+  fread(colClasses = "character", header = T)
+dicc_segmentos[, segmento := factor(segmento)]
+```
+
+```{r include=FALSE}
+# age
+crm[, edad := round(interval(start = crm_fecha_nacimiento,
+                            end = periodo) /
+                     duration(num = 1, units = "years"))]
+# antiguedad
+crm[, antiguedad := round(interval(start = crm_fecha_vinculacion_banco,
+                                   end = periodo) /
+                            duration(num = 1, units = "months"))]
+
+```
+
+```{r include=FALSE}
+crm[crm_estrato == 0, crm_estrato := NA]
+```
+
+```{r include=FALSE}
+fin_vars <- grep("valor", names(crm), value=T)
+crm[, (fin_vars) := lapply(.SD, as.numeric), .SDcols = fin_vars]
+
+```
+
+```{r include=FALSE}
+crm <- merge(crm, dicc_segmentos, by = "crm_nombre_segmento", all.x = T)
+crm[, .N, by = crm_nombre_segmento][order(-N)]
+crm[, .N, by = segmento][order(-N)]
+```
+
+```{r include=FALSE}
+crm[, segmento_comercial := segmento]
+crm[segmento == "Preferente" & is.na(crm_codigo_subsegmento), 
+    segmento_comercial := "Preferente" ]
+crm[segmento == "Preferente" & crm_codigo_subsegmento == "35", 
+    segmento_comercial := "Preferente Plus"]
+# crm[segmento == "Preferente" & crm_codigo_subsegmento == "40", 
+#     segmento_comercial := "Premium Preferente Plus"]
+# crm[, .N, by = segmento_comercial ]
+```
+
+```{r include=FALSE}
+crm <- crm[ segmento_comercial != "Pj"]
+#segemntos tacticos
+cortes_segmentos <- c(min(crm$edad), 13,17,25,59, max(crm$edad))
+nombres_cortes <- c("Infantil", "Adolescente", "Joven", "Adulto", "Experiencia" )
+# head(cut(crm$edad, cortes_segmentos, include.lowest = T, labels = nombres_cortes))
+crm[, segmento_tactico := cut(edad, cortes_segmentos, include.lowest = T, labels = nombres_cortes)]
+crm[, .(edad, segmento_tactico)]
+```
+
+## limpieza de duplicados de crm
+
+
+```{r include=FALSE}
+crm[, crm_id := paste0(crm_tipo_identificacion, crm_numero_identificacion)]
+base_duplicados <- crm[ crm_id %in% crm[duplicated(crm_id), crm_id]][order(-crm_id)]
+gg_miss_fct(x = base_duplicados, fct = crm_nombre_segmento)      
+```
+```{r include=FALSE}
+crm[, .N, by = crm_nombre_segmento][order(-N)]
+```
+```{r include=FALSE}
+
+var_interest <- c(fin_vars, "crm_codigo_tipo_vivienda", "crm_codigo_nivel_educativo", "crm_codigo_estado_civil", "crm_estrato")
+base_duplicados[, lapply(.SD, summary), .SDcols = var_interest, by = crm_nombre_segmento]
+                 
+
+```
+```{r include=FALSE}
+limpieza_duplicados <- base_duplicados[, .(crm_id, crm_fecha_vinculacion_banco)]
+limpieza_duplicados <- limpieza_duplicados[ order(crm_id, - crm_fecha_vinculacion_banco)]
+limpieza_duplicados[, crm_fecha_vin_lag := shift(crm_fecha_vinculacion_banco, 1, 0, "lead"), by = crm_id]
+limpieza_duplicados <- limpieza_duplicados[crm_fecha_vin_lag != "1970-01-01"]
+limpieza_duplicados[, days := crm_fecha_vinculacion_banco - crm_fecha_vin_lag]
+id_duplicads <- limpieza_duplicados[days <1, crm_id]
+```
+```{r}
+crm_no_duplicados <- crm[crm_id %!in% limpieza_duplicados$crm_id ]
+crm_no_duplicados[ crm_id %in% crm_no_duplicados[duplicated(crm_id), crm_id]][order(-crm_id)]
+
+crm_registros_unicos <-  merge(limpieza_duplicados[, crm_id, crm_fecha_vinculacion_banco], crm, by = c("crm_id", "crm_fecha_vinculacion_banco"))
+nrow(crm_registros_unicos) == nrow(limpieza_duplicados)
+crm_registros_unicos <- crm_registros_unicos[ crm_id != id_duplicads | crm_nombre_segmento == "Preferente Medio"]
+crm_registros_unicos[ crm_id == id_duplicads]
+
+setcolorder(crm_registros_unicos, names(crm_no_duplicados))
+crm_lp <-  rbindlist(list(crm_registros_unicos, crm_no_duplicados))
+nrow(crm) - nrow(crm_lp)
+```
+
+
+ la base de banca seguros no contieneel tipo de documento 
+```{r include=FALSE}
+crm_lp
+nrow(crm_lp)
+```
+
+
+```{r include=FALSE}
+gg_miss_fct(x = crm_lp, fct = segmento_tactico)
+```
+
+correcciones
+
+
+```{r include=FALSE}
+levels(crm_lp$segmento_comercial)
+levels_segmento_comercial = c("Micro", "Masivo", "Preferente", "Preferente Plus",
+                              "Premium", "Pj")
+
+crm_lp[, segmento_comercial := 
+         factor(segmento_comercial, levels = levels_segmento_comercial, 
+                ordered = T)]
+
+```
+
+
+# banca seguros
+```{r include=FALSE}
+seguros_path <- get.path(original_path, "seguros")
+tenencia_seguros <- get.path(os.path.join(seguros_path, "tenencia"), get_month(0)) %>% fread(colClasses = "character",  na.strings=c("","NA"))
+names(tenencia_seguros) <- tolower(names(tenencia_seguros))
+tenencia_seguros
+```
+
+
+```{r}
+seguros_cl <- merge(tenencia_seguros, crm_lp[crm_tipo_identificacion == "C"],
+                         by.x = "cedula", by.y = "crm_numero_identificacion")
+seguros_cl
+```
+clientes sin informacion
+```{r}
+nrow(tenencia_seguros)
+nrow(seguros_cl)
+nrow(tenencia_seguros)-nrow(seguros_cl)
+```
+
+```{r}
+uniqueN(tenencia_seguros$cedula)
+uniqueN(seguros_cl$cedula)
+uniqueN(tenencia_seguros$cedula) -uniqueN(seguros_cl$cedula)
+```
+
+
+```{r}
+gg_miss_fct(x = tenencia_seguros, fct = producto)
+```
+
+# diccionario de productos 
+
+```{r}
+nombres_productos <-
+  read_excel(
+  "//bdbemcfs.bancodebogota.net/Banca_Seguros_Analytics/datos/dictionaries/nombres_productos.xlsx"
+  )
+```
+```{r}
+names(nombres_productos) <-
+  c("codigo",
+  "nombre",
+  "nombre_int",
+  "linea",
+  "canal",
+  "modalidad_prima")
+seguros_cl[seguros_cl$producto %!in% nombres_productos$codigo]
+```
+
+```{r}
+seguros_cl[seguros_cl$producto %!in% nombres_productos$codigo][,unique(producto)]
+```
+
+```{r}
+sort(unique(nombres_productos$nombre))
+```
+
+
+```{r}
+nombres_productos <- data.table(nombres_productos)
+nombres_productos[, nombre_tr := tolower(nombre)]
+nombres_productos[, nombre_tr := stri_trans_general(nombre_tr,"Latin-ASCII")]
+sort(unique(nombres_productos$nombre_gr))
+```
+```{r}
+nombres_productos[, nombre_gr := nombre]
+nombres_productos[str_detect(nombre_tr, paste("ap", "accidentes personales", sep = "|"))]
+
+nombres_productos[str_detect(nombre_tr, paste("ap", "accidentes personales", sep = "|")),  nombre_gr := "Accidentes personales"]
+
+nombres_productos[str_detect(nombre_tr, c("auto protegido")), 
+                  nombre_gr := "Auto protegido"]
+
+nombres_productos[str_detect(nombre_tr, c("cancer")),
+                  nombre_gr := "Cancer"]
+
+nombres_productos[str_detect(nombre_tr, c("cuenta protegida")), 
+                  nombre_gr := "Cuenta protegida"]
+
+nombres_productos[str_detect(nombre_tr, c("cuota protegida")), 
+                  nombre_gr := "Cuota protegida"]
+
+nombres_productos[str_detect(nombre_tr, c("proteccion integral")), 
+                  nombre_gr := "Proteccion integral"]
+
+nombres_productos[str_detect(nombre_tr, c("segmento experiencia")), 
+                  nombre_gr := "Segmento experiencia"]
+
+nombres_productos[str_detect(nombre_tr, c("tarjeta protegida")),
+                  nombre_gr := "Tarjeta protegida"]
+
+nombres_productos[str_detect(nombre_tr, c("vida")), 
+                  nombre_gr := "Vida"]
+
+```
+
+```{r}
+null_vars <- c("nombre_gr", "codigo", "nombre_int", "linea", "modalidad_prima", "canal")
+
+seguros_cl[,(null_vars) := NULL]
+```
+```{r}
+nombres_productos[str_detect(canal, "HALL"), canal := "Hall"]
+```
+
+```{r}
+seguros_cl <-
+  merge(seguros_cl,
+  nombres_productos[, .(nombre_gr, codigo, nombre_int, linea, modalidad_prima, canal)],
+  by.y = "codigo",
+  by.x = "producto")
+```
+# diccionario municipio 
+```{r}
+dicc_mun <- fread("datos/dictionaries/CIUDAD.csv")
+names(dicc_mun) <- tolower(names(dicc_mun))
+dicc_mun
+```
+
+```{r}
+crm_lp[, codigo_depto := as.numeric(substr(crm_codigo_ciudad_ppal, 1, 2))]
+crm_lp[, codigo_municipio := as.numeric(substr(crm_codigo_ciudad_ppal, 3, 100))]
+crm_lp <- merge(crm_lp, dicc_mun, by = c("codigo_depto", "codigo_municipio"),all.x = T)
+crm_lp
+```
+
+
+```{r}
+seguros_cl[, codigo_depto := as.numeric(substr(crm_codigo_ciudad_ppal, 1, 2))]
+seguros_cl[, codigo_municipio := as.numeric(substr(crm_codigo_ciudad_ppal, 3, 100))]
+seguros_cl <- merge(seguros_cl, dicc_mun, by = c("codigo_depto", "codigo_municipio"),all.x = T)
+seguros_cl
+```
+```{r}
+unique(seguros_cl$departamento)
+```
+
+```{r}
+seguros_cl[canal == "HALL", canal := "Hall" ]
+```
+
+```{r}
+staging_path <- "datos/staging"
+fwrite(seguros_cl, os.path.join(staging_path, "crm_seguros.csv"))
+```
+
+```{r}
+fwrite(crm_lp, "datos/staging/crm_lp.csv")
+saveRDS(crm_lp, "datos/staging/crm_lp.rds")
+```

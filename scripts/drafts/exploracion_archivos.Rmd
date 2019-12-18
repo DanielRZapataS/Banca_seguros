@@ -1,0 +1,103 @@
+---
+title: "explaracion bases"
+author: "Daniel Zapata"
+date: "6 de mayo de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r}
+# librerias
+library(data.table)
+library(dplyr)
+options(scipen = 999)
+'%!in%' <<-  Negate('%in%')
+```
+cargue bases de tenecia 
+```{r}
+tenencia_seguros_path <- c("datos/original/seguros/tenencia")
+files_tenencia <- list.files(tenencia_seguros_path, full.names = T) %>% file.info() %>% data.frame
+files_tenencia$file_path <- row.names(files_tenencia)
+files_tenencia <- data.table(files_tenencia)
+files_tenencia[, file_name :=  substr(list.files(tenencia_seguros_path), 13, 20)]
+files_tenencia <- files_tenencia[isdir == F]
+# files_tenencia <- files_tenencia[size > 30000000 & size < 50000000]
+```
+
+
+```{r}
+bases_list <- list()
+for(i in 1:nrow(files_tenencia)){
+  print(files_tenencia$file_name[i])
+  
+  base <- fread(files_tenencia$file_path[i], colClasses = "character", na.strings = c("", "NA"), fill=TRUE)
+  base[, periodo:= files_tenencia$file_name[i]]
+  bases_list[[i]] <- base
+  rm(base)
+  gc()
+}
+sapply(bases_list, names)
+names(bases_list) <- files_tenencia$file_name
+```
+
+filtrar sobre bases utiles por numero de columnas y registros 
+```{r}
+tabla <- data.table(names = files_tenencia$file_name, size = files_tenencia$size, rows = sapply(bases_list, nrow), cols = sapply(bases_list, ncol))
+tabla <- tabla[cols == 7 & rows > 700000 ]
+```
+base final
+```{r}
+base_list2 <- list()
+for(i in 1:nrow(tabla)){
+  base_list2[[i]] <- bases_list[[tabla$names[i]]]
+}
+
+tenencia <- rbindlist(base_list2)
+rm(base_list2, bases_list)
+gc()
+names(tenencia) <- tolower(names(tenencia))
+tenencia[, .N, by = periodo]
+```
+diccionario de productos de seguros 
+```{r}
+dictionary <- c("datos/dictionaries")
+dictionary_products <- fread(paste(dictionary, "diccionario_productos.csv", sep = "/"), colClasses = "character")
+names(dictionary_products) <- tolower(names(dictionary_products))
+
+dictionary_products <-
+  dictionary_products[, .(
+  producto,
+  tipo_producto,
+  tipo_seguro,
+  producto_financiero_gnral,
+  periodicidad_cobro_prima,
+  canal,
+  tipo_vigencia
+  )]
+dictionary_products  
+```
+```{r}
+tenencia$producto[tenencia$producto %!in% dictionary_products$producto]
+tenencia <- merge(tenencia, dictionary_products, by = "producto", all.x = T)
+setkey(tenencia, periodo, cedula)
+tenencia 
+```
+```{r}
+tenencia[, .N, by = .(periodo, cedula, tipo_seguro)]
+```
+```{r}
+tenencia[, .N, by = .(periodo, cedula)][order(-N)]
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

@@ -1,0 +1,431 @@
+---
+title: "supply_maker4"
+author: "Daniel Zapata"
+date: "25 de octubre de 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing an d set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r include=FALSE}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx,
+  digest, 
+  VennDiagram,
+  RColorBrewer
+  )
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+numbers_months <- 0
+```
+
+```{r include=FALSE}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+
+##### make folder ####
+cargue_month_path <- paste(cargue_path, date_file(0), sep = "/")
+dir.create(cargue_month_path)
+```
+
+## selection models
+
+This is where test data is used to defined the score boundaries to transpose on
+score table.
+```{r include=FALSE}
+#results_path <- "propension_compra/cuentas_ahorro"
+models_path <-  "propension_compra/model_selection"
+
+file_name <- "pred_test"
+months_process <-  date_file(0)
+products <- c("cancer", "pif", "fraude")
+product_test <- list()
+
+for (i in products) {
+  product_path <-
+    get_path(models_path, paste(months_process, collapse = "|"))
+  product_path <- grep(i, product_path, value = T)
+  product_pred_test <- list()
+  for (j in product_path) {
+    product_pred_test[[j]] <- get_path(j, file_name) %>% fread()
+  }
+  product_pred_test <- rbindlist(product_pred_test)
+  product_pred_test[, decil := cut(
+    xgb_auc_pred,
+    quantile(xgb_auc_pred, probs = seq(0, 1, by = 0.1)),
+    labels = paste0("decil_", seq(1, 10, by = 1)),
+    include.lowest = TRUE
+  ), by = periodo]
+  product_pred_test[, product := i]
+  product_test[[i]] <- product_pred_test
+}
+product_test <- rbindlist(product_test)
+vars <- c("definit", "periodo", "target", "xgb_auc_pred", "xgb_auc_pred_num", "decil", "product")
+product_test <- product_test[, mget(vars)]
+rm(product_pred_test)
+gc()
+```
+gettting the score boundaries by prodcut and decil. 
+score max and min are not continus, so I shift up the max score as boundary
+```{r echo=FALSE}
+deciles_test <-  product_test[, .(clientes_test = .N, efectividad_test = sum(target)/.N, score_max = max(xgb_auc_pred), score_min = min(xgb_auc_pred)), by = .(product, decil)][order(product, decil)]
+deciles_test[, score_min_ajust := shift(score_max, -1, 0, "lead"), by = .(product)]
+deciles_test
+```
+# load score tables 
+
+```{r include=FALSE}
+models_path <-  "propension_compra/model_scoring"
+months_process <-  date_file(0)
+products <- c("cancer", "pif", "fraude")
+product_score <- list()
+file_name <- "pred_score"
+# i = products[1]
+for (i in products) {
+  product_path <-
+    get_path(models_path, paste(months_process, collapse = "|"))
+  product_path <- grep(i, product_path, value = T)
+  product_score_single <- get_path(product_path, file_name) %>% fread()
+  product_score_single <- product_score_single[!duplicated(definit)]
+  product_score_single[, product := i]
+  product_score[[i]] <- product_score_single
+}
+product_score <- rbindlist(product_score)
+rm(product_score_single)
+gc()
+summary(product_score)
+```
+
+```{r include=FALSE}
+for(i in 1:nrow(deciles_test)) {
+  product_score[product == deciles_test$product[i] &
+  pred > deciles_test$score_min_ajust[i] &
+  pred <= deciles_test$score_max[i], 
+  ':='(decil = deciles_test$decil[i], efectividad_esp = deciles_test$efectividad_test[i])]
+}
+product_score[is.na(decil), decil := "decil_10"]
+
+for(i in products){
+  product_score[decil == "decil_10" & product == i, 
+                efectividad_esp := deciles_test[product == i& decil == "decil_10", efectividad_test ]]
+}
+
+
+product_score[, decil := factor(decil, levels = paste0("decil_", 1:10), ordered = T)]
+product_score_wide <- dcast(product_score[, -"periodo"], definit ~ product, value.var = c("pred", "decil", "efectividad_esp") ) 
+product_score_wide[duplicated(definit)]
+product_score_wide
+```
+
+```{r}
+summary(product_score_wide)
+```
+
+
+
+### Distribución de todas las cuentas de ahorro
+```{r echo=FALSE}
+aux <- product_score[, .N, by = .(product, decil)][order(product, decil)]
+aux
+ggplot(data = aux, aes(x = decil, y = N, fill = product)) +
+  geom_bar(stat = "identity", position = position_dodge())
+  
+```
+
+## potencial
+Número de observaciones del potencial: 
+```{r echo=FALSE}
+potencial <- "//bdbemcfs/Banca_Seguros_Analytics/datos/original/potencial_piloto_cuentas" %>% get_path( key_searcher = date_file(0) ) %>% read.xlsx() %>% data.table
+
+### oferta diferente a 675 (pif creditos) y 677 (experiencia cuentas)
+#potencial <- potencial[OFERTA %!in% c(675, 677)]
+
+potencial[, tenencia_cancer := ifelse(is.na(TIENE_1059), 0, 1)]
+potencial[!is.na(TIENE_1057), tenencia_cancer := 1]
+potencial[!is.na(TIENE_615), tenencia_cancer := 1]
+
+#### base de tenencia y clientes potenciales #####
+potencial_modelo <-
+  potencial[, .(definit = DEFINIT1, 
+                tenencia_pif_credito = TIENE_1048,
+                tenencia_fraude = TIENE_1097,
+                tenencia_pif = TIENE_1056, 
+                tenencia_cancer, 
+                edad = EDAD)]
+#binarias
+potencial_modelo[, tenencia_pif_credito := ifelse(is.na(tenencia_pif_credito), 0, 1)]
+potencial_modelo[, tenencia_fraude := ifelse(is.na(tenencia_fraude), 0, 1)]
+potencial_modelo[, tenencia_pif := ifelse(is.na(tenencia_pif), 0, 1)]
+
+#### filtro de edad de productos ####
+pif_edad = 69
+fraude_edad = 65
+cancer_edad = 55
+
+potencial_modelo <-
+  potencial_modelo[edad <= max(c(pif_edad, fraude_edad, cancer_edad))]
+
+##### filtros de duplicados ####
+potencial_modelo[duplicated(definit)]
+potencial_modelo[, .N]
+###### viabilidad del producto #####
+potencial_modelo[, viabilidad_fraude := 
+                    ifelse(tenencia_fraude == 1 |edad > fraude_edad,0, 1)]
+potencial_modelo[, viabilidad_cancer := 
+                    ifelse(tenencia_cancer == 1 |edad > cancer_edad,0, 1)]
+potencial_modelo[, viabilidad_pif :=
+                    ifelse(tenencia_pif == 1 | edad > pif_edad,0, 1)]
+
+potencial_modelo[, viabilidad_pif :=
+                    ifelse(tenencia_pif_credito == 1 ,0, viabilidad_pif)]
+
+rm(potencial)
+gc()
+```
+Cruce cuentas y potencial:
+```{r echo=FALSE}
+##### uniendo ambas tablas ####
+seguros_analytics <- merge(product_score_wide, potencial_modelo, by = "definit")
+# rm(resultados, potencial_modelo)
+gc()
+seguros_analytics[, .N]
+```
+Se pierden más de 20 mil cuentas. Porque?
+
+#### distribución del potencial por decil 
+```{r echo=FALSE}
+aux <- product_score[definit %in% seguros_analytics$definit, .N, by = .(product, decil)][order(product, decil)]
+aux
+
+ggplot(data = aux, aes(x = decil, y = N, fill = product)) +
+  geom_bar(stat = "identity", position = position_dodge())
+
+```
+### interseccion entre los productos por decil 
+
+```{r}
+decil_grupos <- seguros_analytics[.(definit, decil_cancer, decil_pif, decil_fraude)]
+decil_grupos[, .N , by = .(decil_cancer, decil_pif, decil_fraude)]
+```
+
+### diagramas de Venn
+```{r include=FALSE}
+deciles <- paste0("decil_", 1:10)
+i = deciles[1]
+for (i in deciles) {
+  ##### diagran venn ####
+  
+  decil_grupos <- seguros_analytics[decil_cancer == i |
+                                      decil_fraude == i |
+                                      decil_pif == i,
+                                    .(definit, decil_cancer, decil_pif, decil_fraude)]
+  decil_grupos[, decil_cancer := ifelse(decil_cancer == i, 1, 0)]
+  decil_grupos[, decil_pif := ifelse(decil_pif == i, 1, 0)]
+  decil_grupos[, decil_fraude := ifelse(decil_fraude == i, 1, 0)]
+  decil_grupos[, .N , by = .(decil_cancer, decil_pif, decil_fraude)]
+  
+  cancer_efect_esp <-
+    paste("Cancer", deciles_test[decil == i & product == "cancer", round(efectividad_test, 3)], sep = "\n")
+  fraude_efect_esp <-
+    paste("frauder", deciles_test[decil == i & product == "fraude", round(efectividad_test, 3)], sep = "\n")
+  pif_efect_esp <-
+    paste("pif", deciles_test[decil == i & product == "pif", round(efectividad_test, 3)], sep = "\n")
+  
+  # install.packages("VennDiagram")
+  
+  # Prepare a palette of 3 colors with R colorbrewer:
+  
+  myCol <- brewer.pal(3, "Pastel2")
+  
+  
+  # Chart
+  venn.diagram(
+    x = list(decil_grupos[decil_cancer == 1, definit],
+             decil_grupos[decil_fraude == 1, definit],
+             decil_grupos[decil_pif == 1, definit]),
+    category.names = c(cancer_efect_esp, fraude_efect_esp, pif_efect_esp),
+    filename = sprintf(paste0(cargue_month_path, '/%s.png'), i)  ,
+    output = TRUE,
+    main = i,
+    
+    # Output features
+    imagetype = "png" ,
+    height = 480 ,
+    width = 480 ,
+    resolution = 300,
+    compression = "lzw",
+    
+    # Circles
+    lwd = 2,
+    lty = 'blank',
+    fill = myCol,
+    
+    # Numbers
+    cex = .6,
+    fontface = "bold",
+    fontfamily = "sans",
+    
+    # Set names
+    cat.cex = 0.6,
+    cat.fontface = "bold",
+    cat.default.pos = "outer",
+    cat.pos = c(-27, 27, 135),
+    cat.dist = c(0.055, 0.055, 0.085),
+    cat.fontfamily = "sans",
+    rotation = 1
+  )
+}
+
+rm(x)
+rm(decil_grupos)
+gc()
+```
+
+
+
+## diseño de oferta de la campaña
+
+
+
+### estrategia por decil
+Se van a tomar a los clientes yendo de decil en decil, es decir ppor ejemplo en el decil 10 se toman a todos los cleintes que lo sean al algun producto. Despues se toman a todos los clientes de cancer, el remante para pif y depsues fraude. 
+
+### toma de clientes por tasa de efectividad. 
+Se seleccionan a los clientes a partir tomando la combinación decil-producto ordenada a partir de la efectividad.  
+
+```{r}
+summary(seguros_analytics)
+potencial_modelo_long <- melt(potencial_modelo[, .(definit, viabilidad_fraude, viabilidad_cancer, viabilidad_pif)], id.vars = "definit", variable.name = "product", value.name = "viabildad_producto" )
+potencial_modelo_long[, product := gsub("viabilidad_", "", product)]
+seguros_analytics_long <- merge(product_score, potencial_modelo_long, by = c("definit", "product"))
+
+# sum(unique(seguros_analytics_long$definit) %!in% seguros_analytics$definit)
+# sum(seguros_analytics$definit %!in% unique(seguros_analytics_long$definit))
+seguros_analytics_long <- seguros_analytics_long[viabildad_producto == 1, ]
+seguros_analytics_long[, .N, by = .(product, decil)][order(decil)]
+```
+
+```{r}
+efect_pred <-
+  deciles_test[, .(product, decil, efectividad_test)][order(-efectividad_test)]
+  offer_plan_list <- list()
+  clients_list <- c()
+  i = 2
+  for (i in 1:nrow(efect_pred)) {
+  decil_selec <- efect_pred[i, decil]
+  product_selec <- efect_pred[i, product]
+  
+  if (i == 1) {
+    offer_plan_list[[i]] <-
+    seguros_analytics_long[product == product_selec &
+    decil == decil_selec, .(definit,
+    product_decil = paste(product, decil, sep = "-"),
+    efectividad_esp)]
+    clients_list <-
+    seguros_analytics_long[product == product_selec &
+    decil == decil_selec, definit]
+  
+  } else{
+    clients_i <-
+      seguros_analytics_long[definit %!in% clients_list][product == product_selec & decil == decil_selec , definit]
+      
+    clients_list <- c(clients_list, clients_i)
+    offer_plan_list[[i]] <-
+    seguros_analytics_long[definit %in% clients_i][product == product_selec &
+    decil == decil_selec  , .(definit,
+    product_decil = paste(product, decil, sep = "-"),
+    efectividad_esp)]
+    
+  }
+  
+  
+  offer_plan <- rbindlist(offer_plan_list)
+  total_sales <-
+  offer_plan[, .(clientes = .N,
+  sales_esp = .N * unique(efectividad_esp)), by = product_decil][, sum(sales_esp)]
+  if (total_sales > 6000) {
+  break
+  }
+  
+  }
+  
+```
+
+
+```{r}
+offer_plan[, .(clientes = .N, sales_esp = .N*unique(efectividad_esp)), by = product_decil]
+```
+
+```{r}
+aux <- offer_plan[, .(clientes = .N, sales_esp = .N*unique(efectividad_esp)), by = product_decil]
+aux[,':=' (clients_acu = cumsum(clientes), sales_esp_acu = cumsum(sales_esp))]
+aux
+```
+
+```{r}
+offer_plan[, .(clientes = .N, sales_esp = .N*unique(efectividad_esp)), by = product_decil][, .(clientes = sum(clientes), sale_esp = sum(sales_esp))]
+```
+
+
+```{r}
+offer_plan[, product := as.character(lapply(strsplit(x = product_decil, split = "-"), '[[', 1))]
+
+offer_plan[, decil := as.character(lapply(strsplit(x = product_decil, split = "-"), '[[', 2))]
+
+aux <-offer_plan[, .(clientes = .N ), by = .(product, efectividad_esp)][, ventas_esp  := clientes*efectividad_esp]
+aux <- aux[, .(clientes =sum(clientes),  ventas_esp = sum(ventas_esp)), by = product]
+aux[, efect_esp := ventas_esp/clientes]
+aux
+```
+
+```{r}
+offer_plan[, oferta_tmk_codigo := factor(product, levels = c("pif", "cancer", "fraude"),
+                                           labels = c("676", "673", "682"))]
+
+offer_plan_random <- offer_plan[sample(nrow(offer_plan)), .(definit, oferta_tmk_codigo)]
+
+ruta_resultados <- get_path("resultados", "cargue") %>% get_path(date_file(0))
+offer_plan[duplicated(definit)]
+# fwrite(potencial, os.path.join(ruta_resultados, paste0("clientes_potencial_", date_file(0),".csv")))
+fwrite(seguros_analytics, os.path.join(ruta_resultados, paste0("clientes_potencial_modelo_", date_file(0), ".csv")))
+fwrite(offer_plan, os.path.join(ruta_resultados, paste0("cargue_campañas_all_", date_file(0),".csv")))
+fwrite(offer_plan_random, os.path.join(ruta_resultados, paste0("cargue_campañas_",date_file(0) ,".csv")))
+
+```
+

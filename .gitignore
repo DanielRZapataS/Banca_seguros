@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.html
+*.nb.html
+*propension_compra
+*exploracion/DADI.Rmd
+*exploracion/analisis_persistencia/
+*exploracion/datos_old/
+*datos/
+*resultados/

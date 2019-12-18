@@ -1,0 +1,334 @@
+---
+title: "Modelo de propensión de adquisición de seguros de cáncer"
+subtitle: "Descripción del piloto"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen", "GGally", "factoextra", "mclust", "dbscan", "outliers", "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree", "tictoc", "pROC", "InformationValue", "factoextra", "gridExtra")
+source("./scripts/utils.R")
+
+original_path <- "datos/original"
+```
+
+```{r}
+#Importar base de envíos de mayo 2019
+envios <- fread("//bdbemcfs/Banca_Seguros_Analytics/datos_envios_campanas/BASE_673_CON MARCACION_2019_06.csv")
+envios[, orden := seq(1, nrow(envios), by = 1)]
+envios[, con_modelo := ifelse(propension == "CON_PROPENSION", 1, 0)]
+envios[, id := paste0(TIPO, IDEN)]
+
+#Importar predicción
+score <- fread("propension_compra/cuentas_ahorro/model_to_score_20190521_cancer/pred_score.csv")
+score <- score[order(-pred)]
+
+#Importar feedback
+resultados <- fread("datos/original/seguros/ventas/ventas_673_2019_06.csv")
+
+#Crear deciles de probabilidad
+score[,percentil := cut(pred, quantile(score$pred, probs = seq(0, 1, by = 0.01)), labels = paste("decil", seq(1, 100,by = 1)),  include.lowest = TRUE)]
+
+score[,decil := cut(pred, quantile(score$pred, probs = seq(0, 1, by = 0.1)), labels = paste("decil", seq(1, 10,by = 1)),  include.lowest = TRUE)]
+```
+
+```{r}
+#Pegar envios y resultado
+envios <- merge(envios, resultados[, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)], by.x = "IDEN", by.y = "Reporte_Llamadas_EstadoBases[CCCliente]")
+
+setnames(envios, "Reporte_Llamadas_EstadoBases[VENTAS]", "venta")
+
+#Pegar el score a la base de envios
+envios <- merge(envios, score[, .(definit, pred, decil, percentil)], by.x = "id", by.y = "definit")
+```
+
+```{r}
+envios[, mean(pred), by = con_modelo]
+
+#Mirar si existe diferencia en probabilidad entre el grupo de control y tratamiento
+prob_aov <- aov(pred ~ con_modelo, data = envios)
+summary(prob_aov)
+```
+
+```{r}
+#Diferencia en la probabilidad de adquisición entre el grupo de control y tratamiento
+ggplot(envios, aes(x = factor(con_modelo, levels = c(0,1), ordered = T), y = pred)) + 
+  geom_boxplot(aes(fill = factor(con_modelo))) + 
+  ggtitle("Distribución de probabilidad por grupo de control y tratamiento") +
+  guides(fill = FALSE) + 
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  xlab("Control/Tratamiento") + 
+  ylab("Probabilidad estimada")
+```
+
+```{r}
+envios[, .(sum(venta), .N, sum(venta)/.N), by = con_modelo]
+```
+
+
+#Análisis de percentiles
+```{r echo=FALSE}
+base_plot <- envios[, sum(venta), by = percentil]
+base_plot[, percentil_1 := percentil]
+base_plot[percentil %in% c("decil 93", "decil 94", "decil 95", "decil 96", "decil 97", "decil 98", "decil 99", "decil 100"), percentil_1 := "decil 10"]
+
+ggplot(base_plot[, sum(V1), by = percentil_1], aes(x = percentil_1, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de pólizas vendidas") +
+  labs(title = "Pólizas vendidas por decil de probabilidad de toda la base",
+       subtitle = "Producto: 673 - Cáncer") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+```{r echo=FALSE}
+base_plot <- envios[, .N, by = percentil]
+base_plot[, percentil_1 := percentil]
+base_plot[percentil %in% c("decil 93", "decil 94", "decil 95", "decil 96", "decil 97", "decil 98", "decil 99", "decil 100"), percentil_1 := "decil 10"]
+
+ggplot(base_plot[, sum(N), by = percentil_1], aes(x = percentil_1, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de clientes") +
+  labs(title = "Clientes enviados al call center por decil de probabilidad de toda la base",
+       subtitle = "Producto: 673 - Cáncer") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+```{r}
+#Mirar filtros realizados
+master_2019_04 <- readRDS("datos/master/master_scoring/score_master_2019_04.rds")
+score[, periodo := as.Date(periodo)]
+
+master_score <- merge(master_2019_04, score, by = c("definit", "periodo"), all.x = T)
+master_score <- merge(master_score, envios[,.(id, venta, con_modelo)], by.x = "definit", by.y = "id", all.x = T)
+```
+
+```{r}
+master_score <- master_score[order(-pred)]
+#master_score[, sum(venta, na.rm = T), by = decil]
+```
+
+```{r, fig.width=10}
+base_colocacion_score <- master_score[!(is.na(venta))]
+
+#Calcular percentil de score con sólo los enviados
+base_colocacion_score[,percentil_solo_enviados := cut(pred, quantile(pred, probs = seq(0, 1, by = 0.01)), labels = paste("percentil", seq(1, 100,by = 1)),  include.lowest = TRUE)]
+
+#ggplot(base_colocacion_score[, sum(venta), by = percentil_solo_enviados][order(percentil_solo_enviados)], aes(x = percentil_solo_enviados, y = V1)) +
+#  geom_col() +
+#  xlab("") +
+#  guides(fill=FALSE) +
+#  ylab("Número de pólizas vendidas") +
+#  labs(title = "Pólizas vendidas por percentil de probabilidad",
+#       subtitle = "Producto: 673 - Cáncer") + 
+#  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+#  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+#  scale_y_continuous(labels = comma)
+```
+
+```{r}
+#Calcular decil de score con sólo los enviados
+base_colocacion_score[,decil_solo_enviados := cut(pred, quantile(pred, probs = seq(0, 1, by = 0.1)), labels = paste("decil", seq(1, 10,by = 1)),  include.lowest = TRUE)]
+
+#ggplot(base_colocacion_score[, sum(venta), by = decil_solo_enviados][order(decil_solo_enviados)], aes(x = decil_solo_enviados, y = V1)) +
+#  geom_col() +
+#  xlab("") +
+#  guides(fill=FALSE) +
+#  ylab("Número de pólizas vendidas") +
+#  labs(title = "Pólizas vendidas por decil de probabilidad",
+#       subtitle = "Producto: 673 - Cáncer") + 
+#  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+#  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+#  scale_y_continuous(labels = comma)
+```
+
+#Efecto de los filtros
+```{r}
+#Cargar base de ahorros para sacar la variable de promedio semestral
+ahorros <- fread("//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics/Detalle_Productos/AHORROS_2019_04.csv")
+ahorros[, definit := paste0(TIPO_ID, NUM_ID)]
+```
+
+```{r}
+master_score_2 <- merge(master_score, ahorros[, .SD, .SDcols = c("definit", "PROMEDIO_MES", "CREDITOS_MES", "DEBITOS_MES", "EXCEN_GFM", "PROMEDIO_SEMESTRE")], by.x = c("definit", "promedio_mes", "creditos_mes", "debitos_mes", "excen_gfm"), by.y = c("definit", "PROMEDIO_MES", "CREDITOS_MES", "DEBITOS_MES", "EXCEN_GFM"))
+
+master_score <- master_score_2[!(duplicated(definit))]
+rm(master_score_2)
+
+print(paste0("Número de registros: ", nrow(master_score)))
+```
+
+##Filtrados por código subproducto
+```{r}
+master_score[, filtrado_1 := 0]
+
+master_score[!(codigo_subproducto %in% c(10,60,61,62,63)), filtrado_1 := 1]
+paste0("Eliminados por código de subproducto: ", master_score[, sum(filtrado_1)])
+
+ggplot(master_score[, sum(filtrado_1), by = decil][order(-decil)], aes(x = decil, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de clientes") +
+  labs(title = "Clientes filtrados por decil",
+       subtitle = "Filtrados por código de subproducto") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+##Filtrados por promedio semestral
+```{r}
+master_score[, filtrado_2 := 0]
+
+master_score[PROMEDIO_SEMESTRE <= 30000, filtrado_2 := 1]
+paste0("Eliminados por promedio semestral: ", master_score[, sum(filtrado_2)])
+
+ggplot(master_score[, sum(filtrado_2), by = decil][order(-decil)], aes(x = decil, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de clientes") +
+  labs(title = "Clientes filtrados por decil",
+       subtitle = "Filtrados por promedio semestral") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+##Filtrados por política de toques
+```{r}
+#Cargar archivos de enviados de los últimos 6 meses
+archivos_toques <- data.table(file.info(list.files("datos/original/campañas", full.names = T)), keep.rownames = T)[order(-mtime)][2:6,]
+
+fechas <- strsplit(archivos_toques$rn, c("_"))
+fechas <- sapply(fechas, function(x) x[2])
+fechas <- strsplit(fechas, "[.]")
+fechas <- sapply(fechas, function(x) x[1])
+
+archivos_toques[, fecha := fechas]
+
+for(j in 1:nrow(archivos_toques))
+{
+  if(j == 1){
+    envios_pasados <- as.data.table(read.xlsx(archivos_toques$rn[j]))
+    envios_pasados[, periodo := archivos_toques$fecha[j]]
+  } else {
+    temp <- as.data.table(read.xlsx(archivos_toques$rn[j]))
+    temp[, periodo := archivos_toques$fecha[j]]
+    envios_pasados <- rbind(envios_pasados, temp)
+    rm(temp)
+  }
+}
+
+#Mirar cuántos se filtran por toques
+master_score[, filtrado_3 := 0]
+
+master_score[definit %in% envios_pasados$Definit, filtrado_3 := 1]
+paste0("Eliminados por política de toques: ", master_score[, sum(filtrado_3)])
+
+ggplot(master_score[, sum(filtrado_3), by = decil][order(-decil)], aes(x = decil, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de clientes") +
+  labs(title = "Clientes filtrados por decil",
+       subtitle = "Filtrados por política de toques") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+
+##Clientes disponibles
+```{r}
+paste0("Disponible total: ", master_score[filtrado_1 == 0 & filtrado_2 == 0 & filtrado_3 == 0, .N])
+
+ggplot(master_score[filtrado_1 == 0 & filtrado_2 == 0 & filtrado_3 == 0, .N, by = decil][order(-decil)], aes(x = decil, y = N)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de clientes") +
+  labs(title = "Clientes disponibles por decil",
+       subtitle = "") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(N)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```
+
+```{r}
+print(paste("Clientes filtrados únicamente por la política de toques:", master_score[filtrado_1 == 0 & filtrado_2 == 1 & filtrado_3 == 0, .N]))
+```
+
+```{r}
+master_score[filtrado_1 == 0 & filtrado_2 == 0 & filtrado_3 == 0 & total_products > 1, .N, by = decil]
+```
+
+```{r}
+base_plot_2 <- resultados[, sum(`Reporte_Llamadas_EstadoBases[VENTAS]`), by = `Reporte_Llamadas_EstadoBases[Fecha Llamada]`]
+base_plot_2[, fecha := as.Date(`Reporte_Llamadas_EstadoBases[Fecha Llamada]`, format = "%d/%m/%Y")]
+base_plot_2 <- base_plot_2[order(fecha)]
+
+
+ggplot(data=base_plot_2,
+       aes(x=fecha, y=V1)) +
+       geom_line() + 
+  labs(title = "Número de ventas por día") + 
+  geom_text(aes(label = V1), size = 3, vjust = -1)
+```
+
+```{r}
+base_fechas <- resultados
+base_fechas[, fecha := as.Date(`Reporte_Llamadas_EstadoBases[Fecha Llamada]`, format = "%d/%m/%Y")]
+base_fechas[, llamada := 1]
+base_fechas[, id := as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+
+master_score[, num_id := gsub("C|E", "", definit)]
+
+master_score_fecha <- merge(master_score, base_fechas[, .(id, fecha, llamada, `Reporte_Llamadas_EstadoBases[VENTAS]`)], by.x = "num_id", by.y = "id")
+
+plot_base <- master_score_fecha[, .N, by = .(fecha, con_modelo)][order(fecha)]
+
+ggplot(data=plot_base,
+       aes(x=fecha, y=N, colour=factor(con_modelo))) +
+       geom_line() + 
+  labs(title = "Número de llamadas por día") + 
+  geom_text(aes(label = N), size = 3, vjust = -0.3)
+```
+
+```{r}
+base_ventas_modelo_fecha <- master_score_fecha[, .(venta = sum(venta)), by = .(fecha, con_modelo)][order(fecha)]
+
+resumen_ventas <- merge(base_ventas_modelo_fecha, plot_base, by = c("fecha", "con_modelo"))
+resumen_ventas[, tasa := venta/N]
+ggplot(data=resumen_ventas,
+       aes(x=fecha, y=tasa, colour=factor(con_modelo))) +
+       geom_line() + 
+  labs(title = "Tasa de colocación por día") + 
+  geom_text(aes(label = round(tasa, digits = 2)), size = 3, vjust = -0.3)
+
+```
+
+```{r}
+ahorros[CREDITOS_MES > 300000 & PROMEDIO_SEMESTRE < 30000]
+```
+

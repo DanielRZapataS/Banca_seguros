@@ -1,0 +1,150 @@
+---
+title: "Análisis de base de saldos de cuentas"
+subtitle: "Preparación de datos"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen",
+               "GGally", "factoextra", "mclust", "dbscan", "outliers",
+               "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree",
+               "tictoc", "pROC", "InformationValue")
+
+source("scripts/utils.R")
+```
+
+```{r}
+#Importar base de campañas
+base_campanas <- fread("datos/staging/ventas/base_target_cuentas.csv")
+base_campanas[, periodo1 := as.yearmon(periodo1)]
+
+base_campanas[, lag1 := periodo1 - (1/12)]
+
+#Importar últimos seis meses de saldos
+archivos_saldos <- list.files("datos/original/cuentas", full.names = T)
+fechas_archivos <- as.yearmon(substr(archivos_saldos, 32, 38), format = "%Y_%m")
+
+archivos_saldos <- data.table(nombre = archivos_saldos, fecha = fechas_archivos)[order(-fecha)]
+
+for(j in 2:6)
+{
+  if(j == 2){
+      saldos_ahorros <- fread(archivos_saldos$nombre[j], colClasses = "character")
+    } else {
+      saldos_ahorros <- rbind(saldos_ahorros, fread(archivos_saldos$nombre[j], colClasses = "character"))
+    }
+}
+
+#Filtrar empresas
+saldos_ahorros <- saldos_ahorros[TIPO_ID %in% c("C", "E")]
+
+#Crear ID
+saldos_ahorros[, NUM_ID := sub("^[0]+", "", NUM_ID)]
+saldos_ahorros[, ID := paste0(TIPO_ID, NUM_ID)]
+
+#Formatear numéricas
+variables_numericas <- c("CREDITOS_MES", "DEBITOS_MES", "PROMEDIO_MES", "SALDO_DISPONIBLE", "SALDO_INICIAL_MES", "TASA_INTERES", "VALOR_ULTIMO_DEPOSITO")
+saldos_ahorros[, (variables_numericas) := lapply(.SD, as.numeric), .SDcols = variables_numericas]
+
+#Formatear fecha
+saldos_ahorros[, FECHA_APERTURA := convertir_fechas_crm(FECHA_APERTURA)]
+
+saldos_ahorros[, FUENTE := NULL]
+saldos_ahorros[, MARK_EXON_IVA := NULL]
+saldos_ahorros[, NOVEDAD_EMBARGO := NULL]
+saldos_ahorros[, PER_EXTRACTO := NULL]
+
+uniqueN(saldos_ahorros$ID)
+dim(saldos_ahorros)
+
+#Seleccionar la cuenta más reciente para cada persona
+saldos_ahorros[, mas_reciente := ifelse(FECHA_APERTURA == max(FECHA_APERTURA), 1, 0), by = .(ID, PERIODO)]
+saldos_ahorros <- saldos_ahorros[mas_reciente == 1]
+
+#Formatear periodo de la base de cuentas
+saldos_ahorros[, PERIODO := as.yearmon(PERIODO, format = "%Y%m")]
+
+fwrite(saldos_ahorros, "datos/staging/base_cuentas_mas_recientes.csv")
+
+saldos_ahorros[, mas_reciente := NULL]
+
+#Pegar bases
+base_campanas_saldos <- merge(base_campanas, saldos_ahorros, by.x = c("Definit", "lag1"), by.y = c("ID", "PERIODO"), all.x = T)
+base_campanas_saldos[is.na(PRODUCTO), .N]
+
+# kickear variables
+table(base_campanas_saldos$EMBARGO_INF)
+table(base_campanas_saldos$MARCA_RECAUDO)  # 000 para todos
+table(base_campanas_saldos$TASA_INTERES )
+table(base_campanas_saldos$TIPO_RETENC)
+
+variables_a_eliminar <- c("EMBARGO_INF", "MARCA_RECAUDO", "TASA_INTERES", "TIPO_RETENC")
+base_campanas_saldos[, (variables_a_eliminar):= NULL]
+dim(base_campanas_saldos)
+#[1] 328433     22
+
+# variables nuevas
+# ANTIGUEDAD CUENTA
+base_campanas_saldos$FECHA_APERTURA
+head(as.Date(base_campanas_saldos$lag1))
+base_campanas_saldos$ANTIGUEDAD_CTA <- as.Date(base_campanas_saldos$lag1) -   base_campanas_saldos$FECHA_APERTURA
+
+fwrite(base_campanas_saldos, "datos/staging/base_target_saldos_ahorros.csv")
+
+base_campanas_saldos[is.na(PRODUCTO)]
+```
+
+```{r}
+uniqueN(saldos_ahorros[ID %in% base_campanas_saldos[is.na(PRODUCTO)]$Definit]$ID)
+
+str(base_campanas_saldos)
+
+dim(base_campanas_saldos)  
+#[1] 328433     26
+table(base_campanas_saldos$PRODUCTO)
+#  AHO 
+# 321524 
+table(base_campanas_saldos$PRODUCTO_FINANCIERO_GNRAL)
+# Cuentas 
+#  328433
+
+sum(is.na(base_campanas_saldos$EMBARGO_INF)) # [1] 6909
+
+# codigo subproducto
+table(base_campanas_saldos$CODIGO_SUBPRODUCTO)
+
+# 10 nomina 
+# 061 libre ahorro
+#062 Rentahorro
+#063 Flexiahorro
+#055 Pension
+#091 Ahorro programado
+
+#    010    050    055    060    061    062    063    067    068    070    076    080    090    091 
+# 227754      1   1132   7356  24188  16942  38403    997    216     23      1      1     69   3816 
+#    093    096    097    098    110    170    191 
+#     11      3    557      1     33     17      3
+table(base_campanas_saldos$comprado)
+base_campanas_saldos %>% group_by(CODIGO_SUBPRODUCTO) %>% summarize(a = mean(comprado))
+
+
+table(base_campanas_saldos$EXCEN_GFM)
+```

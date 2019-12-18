@@ -1,0 +1,174 @@
+---
+title: "Análisis Noviembre"
+author: "Paula Quintana"
+date: "16 de diciembre de 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("DEDGA-BS_ctas_propension_compra/scripts/files_tools.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/utils.R")
+source("DEDGA-BS_ctas_propension_compra/scripts/common_reports.R")
+
+```
+
+```{r}
+info_path <- "Z:/Informacion_Centralizada/Data_Analytics/"
+root_path <- "Y:/"
+
+original_path <- os.path.join(root_path, "datos/original")
+emisiones_path <- os.path.join(original_path, "emisiones_tmk")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201910")
+envios_path <- os.path.join(original_path, "envio_campañas_tmk")
+resultados_ventas_path <- os.path.join(original_path, "resultados_tmk/resultados_ventas_tmk")
+ventas_path <- os.path.join(original_path, "resultados_tmk/ventas_tmk")
+scoring_master_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/datos/master/master_scoring")
+models_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/propension_compra")
+results_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/resultados")
+```
+
+#Cargue
+Es la oferta que Analytics envía a Campañas para su posterior envío para la campaña de octubre
+```{r}
+cargue_201911 <- get_path(cargue_path, "cargue_campañas_all_201910")%>%fread()
+names(cargue_201911)
+head(cargue_201911)
+unique(cargue_201911$oferta_tmk_codigo)
+summary(factor(cargue_201911$oferta_tmk_codigo))
+```
+
+#Envios
+##Envios Campañas
+Es el envío efectivo de Campañas para la gestión del TMK en el mes de octubre
+```{r}
+envios_201911 <- get_path(envios_path, "Envios_201911")%>%
+  read.xlsx()%>%as.data.table()
+names(envios_201911)
+names(envios_201911) <- tolower(names(envios_201911))
+#Se pasan los nombres de las variables a minúscula
+colnames(envios_201911)[colnames(envios_201911)=="campaña"] <- "campana"
+head(envios_201911)
+unique(envios_201911$oferta)
+summary(factor(envios_201911$oferta))  
+```
+
+###Envios Propensión
+Se filtra el total de envíos de campañas por la campaña de stock y los tres productos de interés
+```{r}
+envios_propension_201911 <- as.data.table(envios_201911[grepl("STOCK", campana)] %>%filter(oferta == 673 | oferta == 676 | oferta == 682))
+head(envios_propension_201911)
+unique(envios_propension_201911$campana)
+unique(envios_propension_201911$oferta)
+summary(factor(envios_propension_201911$oferta))
+```
+
+Se cruzan los envíos con la oferta cargada por Analytics a Campañas para conocer la marcación de modelo o no para los clientes. Se "pierden" los 2000 registros que se mandan de más para contingencia 
+```{r}
+length(setdiff(cargue_201911$definit, envios_propension_201911$definit))
+```
+
+```{r}
+envios_propension_201911 <- as.data.table(merge(cargue_201911, envios_propension_201911, by = "definit"))
+```
+
+Todas las cédulas en envios de campañas si se encuentran en el cargue para octubre
+```{r}
+envios_propension_201911[definit %in% cargue_201911$definit]
+```
+
+```{r}
+envios_propension_201911[oferta_tmk_codigo %in% envios_propension_201911$oferta]
+```
+
+##Ventas
+Se cargan los unos de las ventas marcadas por el tmk para septiembre (faltan los 0)
+```{r}
+ventas_201911 <- get_path(ventas_path, "ventas_tmk_201911")%>%
+  read.xlsx()%>%as.data.table()
+names(ventas_201911)
+names(ventas_201911) <- tolower(names(ventas_201911))
+names(ventas_201911) <- gsub("[.]", "_", names(ventas_201911))
+head(ventas_201911)
+#Se remplazan los puntos de los nombres de las variables por _, para mantener, formatos
+unique(ventas_201911$producto)
+unique(ventas_201911$segmento)
+ventas_201911 <- as.data.table(ventas_201911%>%
+  filter(segmento == "Stock")%>%
+  filter(producto == 673 | producto == 676 | producto == 682))
+ventas_201911[, producto:= as.numeric(producto)]
+#Se cambia la clase de la oferta para poder cruzar con el codigo de oferta de envíos
+summary(factor(ventas_201911$producto))
+#El conteo de ventas no cuadra con el número de ventas reportado en los historicos de septiembre para PIF 676 y fraude 682
+colnames(ventas_201911)[colnames(ventas_201911)=="documento_cliente"] <- "num_id"
+ventas_201911[, num_id:= as.numeric(num_id)]
+#Se cambia el nombre para que coincida el num_id con el de envíos
+```
+
+```{r}
+envios_propension_201911[num_id %in% ventas_201911$num_id]
+```
+
+```{r}
+ventas_201911[num_id %!in% envios_propension_201911$num_id]
+```
+
+```{r}
+ventas_201911 <- merge(envios_propension_201911, ventas_201911[, c( "producto", "num_id")], by = "num_id", all.x = T)
+ventas_201911[, venta:= ifelse(is.na(producto), 0, 1)]
+
+```
+
+```{r}
+ventas_201911[, producto:= ifelse(is.na(producto), 
+                                oferta, producto)]
+ventas_201911[, producto:= NULL]
+```
+
+```{r}
+ventas_201911[, .(ventas = sum(venta), registros = .N), by = .(oferta)][order(oferta)]
+```
+
+```{r}
+ventas_201911[, .N, by = .(grupo, venta, oferta_tmk_codigo)][order(oferta_tmk_codigo, grupo)]
+```
+Se realiza el cálculo de la efectividad para los tres productos
+```{r}
+ventas_201911[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo)][order(oferta_tmk_codigo)]
+```
+
+Se diferencia la efectividad entre grupo tratamiento y control
+```{r}
+ventas_201911[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(grupo)]
+```
+
+Para así, hacer la diferenciación de las tasas tanto para cada uno de los tres productos como por grupos
+```{r}
+ventas_201911[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(oferta_tmk_codigo, grupo)][order(oferta_tmk_codigo)]
+```

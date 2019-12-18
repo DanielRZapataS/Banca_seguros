@@ -1,0 +1,265 @@
+---
+title: "Análisis exploratorio"
+subtitle: "Gráficos descriptivos"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen",
+               "GGally", "factoextra", "mclust", "dbscan", "outliers",
+               "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree",
+               "tictoc", "pROC", "InformationValue")
+
+source("scripts/utils.R")
+
+'%!in%' <<-  Negate('%in%')
+source("exploracion/files_tools.R")
+
+original_path <- "datos/original"
+staging_path <- "datos/staging"
+dictionary_path <- "datos/dictionaries"
+master_path <- "datos/master"
+models_path <- "propension_compra/cuentas_ahorro"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+
+info_path <- "//bdbemcfs.bancodebogota.net/Analytics/Informacion_Centralizada/Data_Analytics"
+
+
+pn_products <-
+  c(
+    "ahorro",
+    "tarj",
+    "nomina",
+    "crediservice",
+    "cdt",
+    "libranza",
+    "libre_destino",
+    "vivienda",
+    "ctas_corrientes",
+    "vehiculos"
+  )
+products <- c("cancer", "pif", "fraude")
+
+cancer <- c(673)
+pif <- c(676)
+fraude <- c(682)
+```
+
+```{r}
+i=1
+
+##### model meta data ####
+print("Making model's fold")
+gc()
+model_alias_modeling <-
+  paste0("prueba_", today() %>% format(., "%Y%m%d"), "_", products[i])
+model_type_modeling <- products[i]
+# model product folder
+model_alias_modeling <- os.path.join(models_path, model_alias_modeling)
+dir.create(model_alias_modeling)
+
+# models folder
+models_folder <- os.path.join(model_alias_modeling, "models_library")
+dir.create(models_folder)
+
+# plots folder 
+plots_folder <- os.path.join(model_alias_modeling, "plots")
+dir.create(plots_folder)
+
+
+##### load data ####
+print("Loading master table ")
+data <- get.path(master_path, "master") %>% readRDS
+
+print(paste("Loading data for", products[i]))
+
+if(products[i] == "cancer"){data <- data[oferta == 673]}
+if(products[i] == "pif"){data <- data[oferta == 676]}
+if(products[i] == "fraude"){data <- data[oferta == 682]}
+
+# fixing periodo variable that daniel shit on it
+data[, periodo1 := yearmon(periodo1)]
+data[, periodo := as.Date(periodo1)]
+data[, periodo1 := NULL]
+data[, target := factor(target)]
+
+#fixing nivel educativo that zapata shit on it
+data[crm_nombre_nivel_educativo == "<NA>", crm_nombre_nivel_educativo := "UNKNOW"]
+data[is.na(crm_nombre_nivel_educativo), crm_nombre_nivel_educativo := "UNKNOW"]
+```
+
+```{r}
+print(" making products plots")
+plots_path <- os.path.join(plots_product, products[i])
+dir.create(plots_path)
+name_f <- "per_target"
+p <- data %>%
+  group_by(target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>%
+  ggplot(aes(reorder(target,-percent), percent), fill = target) +
+  geom_col(fill = c("#FC4E07", "#E7B800")) +
+  geom_text(
+    aes(label = sprintf("%.2f%%", percent)),
+    hjust = 0.01,
+    vjust = -0.5,
+    size = 3
+  ) +
+  theme_bw() +
+  xlab(paste("Compradores de", products[i])) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje agregado de compradores de", products[i]))
+
+print(p)
+
+ggsave(plot = p,
+       file = os.path.join(plots_path, paste0(products[i], "_", name_f, ".png")))
+```
+
+```{r}
+name_f <- "per_target_mes"
+plot_base <- data %>% 
+  group_by(periodo, target) %>% 
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100) %>% data.table()
+
+p <-
+  ggplot(plot_base[target == 1], aes(periodo, percent), fill = periodo) +
+  geom_col(fill = "#FC4E07") +
+  geom_text(
+    aes(label = sprintf("%.2f%%", percent)),
+    hjust = 0.5,
+    vjust = 1,
+    size = 3,
+    angle = -45
+  ) +
+  
+  theme_bw() +
+  xlab("Meses") +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores de", products[i]))
+
+print(p)
+
+ggsave(plot = p,
+       file = os.path.join(plots_path, paste0(products[i], "_", name_f, ".png")))
+```
+
+```{r}
+name_f <- "nivel_educacion"
+x_lab <- "Nivel educativo"
+p <- data %>%
+  group_by(crm_nombre_nivel_educativo, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table()
+p <- p[target == 1] %>% 
+  ggplot(aes(x = crm_nombre_nivel_educativo, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+    x = crm_nombre_nivel_educativo,
+    y = percent,
+    label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste(
+    "Porcentaje de clientes compradores por",
+    tolower(x_lab),
+    "en",
+    products[i]
+  ))  +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) + 
+  guides(fill = NA)
+
+print(p)
+
+ggsave(plot = p,
+       file = os.path.join(plots_path, paste0(products[i], "_", name_f, ".png")))
+
+```
+
+```{r}
+name_f <- "ocupacion"
+  x_lab <- "Ocupacion"
+  p <- data %>%
+    group_by(crm_nombre_ocupacion, target) %>%
+    summarise(Count = n()) %>%
+    mutate(percent = prop.table(Count) * 100) %>% data.table()
+  p <- p[target == 1] %>% 
+    ggplot(aes(x = crm_nombre_ocupacion, y = percent, fill = target)) +
+    geom_bar(stat = "identity") + geom_text(aes(
+      x = crm_nombre_ocupacion,
+      y = percent,
+      label = paste0(round(percent, 2), "%")
+    ), size = 4) + theme_bw() +
+    xlab(x_lab) +
+    ylab("Porcentaje") +
+    ggtitle(paste(
+      "Porcentaje de clientes compradores por",
+      tolower(x_lab),
+      "en",
+      products[i]
+    ))  +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+  
+ggsave(plot = p,
+         file = os.path.join(plots_path, paste0(products[i], "_", name_f, ".png")))
+
+print(p)  
+```
+
+```{r}
+name_f <- "departamento"
+  x_lab <- "Departamento"
+  p <- data %>%
+    group_by(departamento, target) %>%
+    summarise(Count = n()) %>%
+    mutate(percent = prop.table(Count) * 100) %>% data.table()
+  p <- p[target == 1] %>%
+    ggplot(aes(x = departamento, y = percent, fill = target)) +
+    geom_bar(stat = "identity") +
+    geom_text(
+      aes(
+        x = departamento,
+        y = percent,
+        label = paste0(round(percent, 2), "%"),
+        hjust = 0.5,
+        vjust = 1,
+        size = 3,
+        angle = -45
+      ),
+      size = 4
+    ) + theme_bw() +
+    xlab(x_lab) +
+    ylab("Porcentaje") +
+    ggtitle(paste(
+      "Porcentaje de clientes compradores por",
+      tolower(x_lab),
+      "en",
+      products[i]
+    )) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(plot = p,
+         file = os.path.join(plots_path, paste0(products[i], "_", name_f, ".png")))
+
+```
+
+

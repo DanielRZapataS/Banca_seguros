@@ -1,0 +1,230 @@
+---
+title: "exploracion clientes optimizacion"
+author: "Daniel Zapata"
+date: "5 de diciembre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing an d set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r include=FALSE}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx,
+  digest, 
+  VennDiagram,
+  RColorBrewer,
+  ompr,
+  ompr.roi,
+  ROI.plugin.symphony,
+  tictoc
+  )
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+numbers_months <- 0
+
+# install.packages("Rcplex")
+# install.packages("Rtools")
+# library(Rtools)
+```
+
+```{r include=FALSE}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+
+##### make folder ####
+##### make folder ####
+insumos_opti <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/insumo_optimizacion")
+```
+
+
+```{r cargue datos, include=FALSE}
+seguros_analytics <- fread( paste(insumos_opti, "seguros_analytics_201908_201912.csv", sep = "/"))
+seguros_analytics[, periodo_1 := periodo +1]
+```
+
+```{r}
+seguros_analytics_1 <-
+  merge(
+  seguros_analytics[, .(periodo,  definit, grupo.1 = "x", pred_cancer, pred_fraude, pred_pif)],
+  seguros_analytics[, .(periodo_1,definit, grupo.2 = "y")],
+  by.x = c("periodo", "definit"),
+  by.y = c("periodo_1", "definit"),
+  all = T
+  )
+seguros_analytics_1 <- seguros_analytics_1[periodo %!in% unique(seguros_analytics_1$periodo)[c(1, length(unique(seguros_analytics_1$periodo)))]]
+  
+seguros_analytics_1[grupo.1 == "x" & is.na(grupo.2), tipo := "add"]
+seguros_analytics_1[grupo.2 == "y" & is.na(grupo.1), tipo := "drop"]
+seguros_analytics_1[grupo.1 == "x" & grupo.2 == "y", tipo := "stock"]
+  
+```
+
+```{r}
+seguros_analytics_1[, .N, by = .(periodo, tipo)]
+```
+```{r}
+seguros_analytics_2 <- melt(seguros_analytics_1[, -c("grupo.1", "grupo.2")], id.vars = c("periodo", "definit", "tipo"), variable.name = "product", value.name = "pred")
+seguros_analytics_2[, product := gsub(pattern = "pred_", replacement = "", product)]
+seguros_analytics_2 <- seguros_analytics_2[tipo != "drop"]
+```
+
+```{r}
+ggplot(seguros_analytics_2, aes(y = pred, x = tipo, fill = tipo)) +
+  geom_boxplot() +
+  facet_grid(periodo ~ product)
+  
+```
+
+```{r}
+ggplot(seguros_analytics_2, aes(x = pred, fill = tipo)) +
+  geom_density(alpha=.3) +
+  facet_grid(periodo ~ product)
+```
+
+```{r}
+
+periodos <- unique(seguros_analytics_2$periodo)
+productos <- unique(seguros_analytics_2$product)
+i = periodos[1]
+j = productos[1]
+for (i in periodos) {
+  for (j in productos) {
+    x <-
+      seguros_analytics_2[periodo == i &
+                            product == j & tipo == "stock", pred]
+    y <-
+      seguros_analytics_2[periodo == i &
+                            product == j & tipo == "add", pred]
+    print(paste(i, j))
+    print("stock")
+    print(summary(x))
+    print("add")
+    print(summary(y))
+    res <- wilcox.test(x, y, alternative = "two.sided")
+    print(res)
+  }
+}
+
+
+```
+
+```{r}
+seguros_analytics_1 <-
+  merge(
+  seguros_analytics[, .(periodo,  definit, grupo.1 = "x", decil_cancer, decil_fraude, decil_pif)],
+  seguros_analytics[, .(periodo_1,definit, grupo.2 = "y")],
+  by.x = c("periodo", "definit"),
+  by.y = c("periodo_1", "definit"),
+  all = T
+  )
+seguros_analytics_1 <- seguros_analytics_1[periodo %!in% unique(seguros_analytics_1$periodo)[c(1, length(unique(seguros_analytics_1$periodo)))]]
+  
+seguros_analytics_1[grupo.1 == "x" & is.na(grupo.2), tipo := "add"]
+seguros_analytics_1[grupo.2 == "y" & is.na(grupo.1), tipo := "drop"]
+seguros_analytics_1[grupo.1 == "x" & grupo.2 == "y", tipo := "stock"]
+
+seguros_analytics_2 <- melt(seguros_analytics_1[, -c("grupo.1", "grupo.2")], id.vars = c("periodo", "definit", "tipo"), variable.name = "product", value.name = "decil")
+seguros_analytics_2[, product := gsub(pattern = "decil_", replacement = "", product)]
+seguros_analytics_2 <- seguros_analytics_2[tipo != "drop"]
+aux <- seguros_analytics_2[, .(clientes = .N), by = .(periodo, product, tipo, decil)]
+aux[, total_decil := sum(clientes), by = .(periodo,product, decil)]
+aux[, clientes_per := clientes/total_decil]
+aux[, clientes_per_lab := paste0(round(clientes_per*100, digits = 2), "%")]
+aux[order(periodo, decil)]
+aux[, decil := factor(decil, levels = paste0("decil_", 1:10))]
+aux <- aux[order(periodo, product, decil)]
+```
+
+```{r}
+ggplot(data = aux[tipo == "add"], aes(x = decil, y = clientes)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label=clientes_per_lab), vjust=1.6, color="white", size=2)+
+  theme_minimal() +
+  facet_grid(periodo ~ product)
+  
+```
+
+```{r}
+aux[tipo == "add", .(suma = sum(clientes)), by = .(product, periodo)]
+
+aux[tipo == "add" & decil %in% c(paste0("decil_", 8:10)), .(renovacion = mean(clientes_per), disp = sd(clientes_per)), by = .(product, decil)]
+
+```
+
+
+```{r}
+seguros_analytics_1 <-
+  merge(
+  seguros_analytics[, .(periodo,  definit, grupo.1 = "x")],
+  seguros_analytics[, .(periodo_1,definit, grupo.2 = "y")],
+  by.x = c("periodo", "definit"),
+  by.y = c("periodo_1", "definit"),
+  all = T
+  )
+seguros_analytics_1 <- seguros_analytics_1[periodo %!in% unique(seguros_analytics_1$periodo)[c(1, length(unique(seguros_analytics_1$periodo)))]]
+  
+seguros_analytics_1[grupo.1 == "x" & is.na(grupo.2), tipo := "add"]
+seguros_analytics_1[grupo.2 == "y" & is.na(grupo.1), tipo := "drop"]
+seguros_analytics_1[grupo.1 == "x" & grupo.2 == "y", tipo := "stock"]
+seguros_analytics_1 <- seguros_analytics_1[tipo != "drop"]
+aux <- seguros_analytics_1[, .(clientes = .N), by = .(periodo, tipo)]
+aux[, total := sum(clientes), by = .(periodo)]
+aux[, clientes_per := clientes/total]
+  aux[, clientes_per_lab := paste0(round(clientes_per*100, digits = 2), "%")]
+```
+
+```{r}
+ggplot(data = aux, aes(x = tipo, y = clientes)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label=clientes_per_lab), vjust=1.6, color="white", size=2)+
+  theme_minimal() +
+  facet_grid(~ periodo)
+```
+##### efectividad total 
+```{r}
+seguros_analytics[, .N, by = .(periodo, efectividad_esp_cancer)][, sum(efectividad_esp_cancer*N)/sum(N), by = periodo]
+```
+
+```{r}
+seguros_analytics[, .N, by = .(periodo, efectividad_esp_fraude)][, sum(efectividad_esp_fraude*N)/sum(N), by = periodo]
+```
+
+```{r}
+seguros_analytics[, .N, by = .(periodo, efectividad_esp_pif)][, sum(efectividad_esp_pif*N)/sum(N), by = periodo]
+```
+

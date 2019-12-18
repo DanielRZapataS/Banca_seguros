@@ -1,0 +1,101 @@
+---
+title: "Persistencia de cuentas de ahorros"
+subtitle: "Preparación de datos"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen",
+               "GGally", "factoextra", "mclust", "dbscan", "outliers",
+               "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree",
+               "tictoc", "pROC", "InformationValue")
+
+source("scripts/utils.R")
+#Cargar datos
+##Cargar saldos de productos
+archivos <- data.table(file.info(list.files("./datos/original/cuentas/", full.names = T)), keep.rownames = T)[order(-mtime)]
+temp <- data.table()
+for(j in 1:nrow(archivos))
+{
+   if(j == 1){
+     temp <- fread(archivos$rn[j], colClasses = "character")
+  } else {
+     temp <- rbind(temp, fread(archivos$rn[j], colClasses = "character"))
+  }
+}
+saldos_cuentas <- temp
+rm(temp)
+
+saldos_cuentas_resumen <- saldos_cuentas[, .(PERIODO, NUMERO_PRODUCTO, FECHA_APERTURA)]
+rm(saldos_cuentas)
+```
+
+```{r}
+#Convertir fecha a formato R
+saldos_cuentas_resumen[, FECHA_APERTURA := convertir_fechas_crm(FECHA_APERTURA)]
+saldos_cuentas_resumen <- saldos_cuentas_resumen[FECHA_APERTURA > "2017-12-31"]
+
+saldos_cuentas_resumen[, MES_APERTURA := paste0(substr(FECHA_APERTURA, 1, 4), substr(FECHA_APERTURA, 6, 7))]
+saldos_cuentas_resumen[, COSECHA := ifelse(MES_APERTURA == PERIODO, 1, 0)]
+
+
+```
+
+```{r}
+setorder(saldos_cuentas_resumen, NUMERO_PRODUCTO, PERIODO)
+saldos_cuentas_resumen
+```
+
+```{r}
+meses <- unique(saldos_cuentas_resumen$PERIODO) %>% sort
+saldos_cuentas_resumen[, month_id := factor(PERIODO, levels = meses, ordered = T)]
+saldos_cuentas_resumen[, month_id := as.numeric(month_id)]
+```
+
+```{r}
+null_vars <- c("FECHA_APERTURA", "MES_APERTURA")
+saldos_cuentas_resumen[, (null_vars) := NULL]
+```
+
+```{r}
+datos <- copy(saldos_cuentas_resumen)
+for(i in 1:(length(meses)-1)){
+  datos_pivote <- copy(datos[, .(NUMERO_PRODUCTO, month_id)])
+  datos_pivote[, month_id := month_id - i]
+  datos_pivote[, var := 1]
+  datos <- merge(datos, datos_pivote, by = c("NUMERO_PRODUCTO", "month_id"), all.x = T)
+  datos[is.na(var), var := 0]
+  setnames(datos, "var", paste0("mes", i))
+}
+
+datos <- datos[COSECHA == 1]
+
+cosecha <- datos[, lapply(.SD, sum), by = PERIODO, .SDcols = c("COSECHA", paste0("mes", 1:(length(meses)-1)))][order(PERIODO)]
+fwrite(cosecha, "datos/staging/cosechas_cuentas.csv")
+cosecha
+```
+
+```{r}
+
+```
+
+
+

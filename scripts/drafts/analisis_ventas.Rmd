@@ -1,0 +1,202 @@
+---
+title: "Análisis de ventas y bases enviadas al call"
+subtitle: "Preparación de datos"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen",
+               "GGally", "factoextra", "mclust", "dbscan", "outliers",
+               "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree",
+               "tictoc", "pROC", "InformationValue")
+```
+
+```{r}
+archivos_campanas <- list.files("datos/original/campañas", full.names = T)
+lista_campanas <- list()
+for(i in 1:length(archivos_campanas))
+{
+  if(i == 1){
+    base_campanas <- data.table(read.xlsx(archivos_campanas[i]))
+    base_campanas[, periodo := substr(archivos_campanas[i], 32, 38)]
+  } else {
+    temp2 <- data.table(read.xlsx(archivos_campanas[i]))
+    temp2[, periodo := substr(archivos_campanas[i], 32, 38)]
+    
+    base_campanas <- rbind(base_campanas, temp2)
+  }
+}
+rm(temp2)
+
+base_campanas[, .N, by = "Campaña"]
+base_campanas[, periodo1 := as.yearmon(periodo, format = "%Y-%m")]
+base_campanas[, periodo := NULL]
+base_campanas[, Oferta := as.character(Oferta)]
+
+base_campanas <- base_campanas[periodo1 != "may. 2019"]
+
+base_campanas[grep("STOCK", `Campaña`), tipo_base := "stock"]
+base_campanas[grep("BIENVENIDA", `Campaña`), tipo_base := "bienvenida"]
+```
+
+```{r}
+#Cargar base de ventas
+base_ventas <- fread("datos/original/seguros/ventas/ventas_consolidado_ene_abr.csv", colClasses = "character")
+base_ventas[,id := paste0(tipo_id, num_id)]
+base_ventas[, fecha := as.yearmon(as.Date(fecha, format = "%d/%m/%Y"))]
+base_ventas[, comprado := 1]
+table(base_ventas$fecha)
+# dim(base_ventas) #36537
+# ventas julian 5177 + 9441 + 9882 + 11245 # 35745
+```
+
+```{r}
+#Cruzar enero para ver si los que están en ventas están en la campaña
+base_enero <- base_campanas[periodo1 == "ene. 2019"]
+base_enero[, Oferta := as.character(Oferta)]
+
+base_cruzada <- merge(base_enero, base_ventas[fecha == "ene. 2019", .(id, cod_producto, comprado)], by.x = c("Definit", "Oferta"), by.y = c("id", "cod_producto"), all = T)
+
+sum(base_cruzada$comprado, na.rm = T)
+```
+
+```{r}
+#Pegar bases de campañas y ventas
+# id test 
+base_campanas[Definit =='C1000116620', ] 
+base_ventas[id =='C1000116620', ] 
+
+base_completa <- merge(base_campanas[,.(Definit, Oferta, periodo1, tipo_base)], base_ventas[, .(id, cod_producto, comprado, fecha)], by.x = c("Definit", "Oferta", "periodo1"), by.y = c("id", "cod_producto", "fecha"), all = T)
+
+# no comprado <- 0 
+base_completa$comprado <- ifelse(is.na(base_completa$comprado), 0, base_completa$comprado) 
+
+table(base_completa$tipo_base, base_completa$comprado)
+
+base_completa %>% group_by(periodo1, tipo_base, Oferta, comprado) %>% count( )
+
+
+# los que no cruzan !!!
+table(base_completa[is.na(tipo_base), ]$comprado)
+
+# ensayo cruce con solo Definit y Oferta
+# esto si funciona
+base_completa_2 <- merge(base_campanas[,.(Definit, Oferta, tipo_base, periodo1)], base_ventas[, .(id, cod_producto, comprado)], by.x = c("Definit", "Oferta"), by.y = c("id", "cod_producto"), all = T)
+
+base_completa_2$comprado <- ifelse(is.na(base_completa_2$comprado), 0, base_completa_2$comprado) 
+
+table(base_completa_2$tipo_base, base_completa_2$comprado)
+ 
+#                   0      1
+#   bienvenida 112216  17431
+#   stock      348736  14126
+
+base_completa_2 %>% group_by( tipo_base, Oferta, comprado) %>% count( )
+
+# los que siguen sin cruzar
+base_completa_2[is.na(tipo_base), ]
+table(  base_completa_2[is.na(tipo_base), ]$Oferta)
+
+# productos que no cruzan
+# 657  658  659  672  673  674  676  678  679  680  681  682 
+#  21   21   66  278  123   23 1134  750  264 1177  363  767 
+
+
+ids_no_cruzan <- base_completa_2[is.na(tipo_base), ]$Definit 
+
+length(ids_no_cruzan)
+# 4987 no cruzzan por producto & cc
+
+
+# ofertas para ids que no cruzan ? 
+base_campanas[Definit %in% ids_no_cruzan, ]
+
+length(setdiff(base_ventas$id, base_campanas$Definit))
+#4348 que no cruzan ni por id
+```
+
+```{r}
+#Cruzar con base de nombres de productos
+dicc_productos <- fread("datos/dictionaries/diccionario_productos.csv", colClasses = "character")
+
+base_completa_2_prod <- merge(base_completa_2, dicc_productos[, .(PRODUCTO, TIPO_PRODUCTO, TIPO_SEGURO, PRODUCTO_FINANCIERO_GNRAL)], by.x = "Oferta", by.y = "PRODUCTO")
+
+dim(base_completa_2)
+
+dim(base_completa_2_prod)
+#Exportar
+fwrite(base_completa_2_prod, "datos/staging/base_target.csv")
+
+```
+
+```{r}
+table(base_completa_2_prod$TIPO_PRODUCTO)
+# todos voluntarios
+
+table(base_completa_2_prod$TIPO_SEGURO)
+
+
+# AccidPerson      Cancer   Desempleo      Fraude        Vida   VidaGrupo 
+#      127926      110001        1540         110      257169         750 
+
+# base_completa_2_prod[is.na(TIPO_SEGURO), ]
+
+table(base_completa_2_prod$PRODUCTO_FINANCIERO_GNRAL)
+# CredConsu   Cuentas  TarjCred 
+#     45358    449175      2963 
+
+table(base_completa_2_prod$PRODUCTO_FINANCIERO_GNRAL,base_completa_2_prod$TIPO_SEGURO )
+#           AccidPerson Cancer Desempleo Fraude   Vida VidaGrupo
+# CredConsu           0      0         0      0  45358         0
+# Cuentas        127641 109723         0      0 211811         0
+# TarjCred          285    278      1540    110      0       750
+
+
+subset_target_CUENTAS <-  base_completa_2_prod[
+  PRODUCTO_FINANCIERO_GNRAL == "Cuentas" & TIPO_SEGURO %in% c( "AccidPerson", "Cancer", "Vida" ) & tipo_base =="stock"]
+
+dim(subset_target_CUENTAS)
+#326358      7
+
+table(subset_target_CUENTAS$TIPO_SEGURO, subset_target_CUENTAS$comprado)
+
+#                  0      1
+# AccidPerson  65343   2644
+# Cancer      106003   3597
+# Vida        141351   7420
+
+table(subset_target_CUENTAS$TIPO_SEGURO, subset_target_CUENTAS$ Oferta )
+
+#                673    676    677    682
+# AccidPerson      0      0      0  67987
+# Cancer      109600      0      0      0
+# Vida             0 121675  27096      0
+
+table(subset_target_CUENTAS$TIPO_SEGURO, subset_target_CUENTAS$tipo_base )
+#              stock
+# AccidPerson  67987
+# Cancer      109600
+# Vida        148771
+
+fwrite(subset_target_CUENTAS, "datos/staging/base_target_cuentas.csv")
+
+```
+

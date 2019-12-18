@@ -1,0 +1,271 @@
+---
+title: "caracterizacion_clientes_agosto"
+author: "Daniel Zapata"
+date: "27 de septiembre de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("scripts/files_tools.R")
+source("scripts/utils.R")
+source("scripts/common_reports.R")
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+gestion <- paste(original_path, "gestion_llamadas_tmk/historial", sep = "/")
+cargue_path <- os.path.join(root_path, "DEDGA-BS_ctas_propension_compra/resultados/cargue/201907")
+envios_path <- paste0(original_path, "/envio_campañas_tmk")
+```
+# Datos 
+
+### resumen de la gestión de los cliente 
+```{r}
+resumen_clientes <- get_path("resultados/caracterizacion_clientes", "201908") %>%  fread()
+head(resumen_clientes)
+```
+###  campaña de agosto 
+```{r}
+cargue_201907 <- get_path(cargue_path, "cargue_campañas_all_201907")%>%fread()
+head(cargue_201907)
+```
+
+```{r}
+cargue_201907[, .N, by = .(oferta_tmk, grupo)]
+```
+```{r}
+cargue_201907 <-
+  cargue_201907[, .(
+  definit,
+  periodo,
+  pred_cancer,
+  decil_cancer,
+  pred_pif,
+  decil_pif,
+  pred_fraude,
+  decil_fraude,
+  producto_1,
+  producto_2,
+  producto_3,
+  tenencia_pif_credito,
+  tenencia_fraude,
+  tenencia_pif,
+  tenencia_cancer,
+  edad,
+  viabilidad_fraude,
+  viabilidad_cancer,
+  viabilidad_pif,
+  oferta_tmk,
+  grupo,
+  oferta_tmk_codigo
+  )]
+cargue_201907[oferta_tmk == "pif", ':='(pred_oferta = pred_pif, decil_oferta = decil_pif)] 
+cargue_201907[oferta_tmk == "cancer", ':='(pred_oferta = pred_cancer, decil_oferta = decil_cancer)] 
+cargue_201907[oferta_tmk == "fraude", ':='(pred_oferta = pred_fraude, decil_oferta = decil_fraude)] 
+```
+
+```{r}
+resumen_clientes
+cargue_201907
+```
+
+```{r}
+resultado_modelo_201908 <- resumen_clientes[periodo == 201908]
+resultado_modelo_201908 <-
+  merge(resultado_modelo_201908,
+  cargue_201907[, .(definit, oferta_tmk, pred_oferta, decil_oferta)],
+  by = c("definit", "oferta_tmk"))
+resultado_modelo_201908[, decil_oferta := factor(decil_oferta, levels = paste0("decil_", 1:10), ordered = T)]
+head(resultado_modelo_201908)
+```
+
+```{r}
+resultado_modelo_201908[, .N, by = .(oferta_tmk)]
+resultado_modelo_201908[, .N, by = .(oferta_tmk,grupo, decil_oferta)][order(oferta_tmk, grupo, decil_oferta)]
+```
+Clients were not differenciated by deciles between control and treatment groups.
+```{r}
+resultado_modelo_201908[, .(clientes = .N, ventas = sum(venta), efectividad = sum(venta)/.N ), by = .(oferta_tmk, decil_oferta)][order(oferta_tmk,  decil_oferta)]
+```
+However, deciles of probabilities are in fact disaggregating clients 
+
+```{r}
+resultado_modelo_201908[, .(clientes = .N, ventas = sum(venta), efectividad = sum(venta)/.N ), by = .(oferta_tmk, decil_oferta)] %>% 
+  ggplot(aes(x = decil_oferta, y = efectividad, fill = oferta_tmk)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  labs(title = "Distribución de efectividad por decil y producto", x = "decil")
+```
+
+```{r}
+resultado_modelo_201908[, .(clientes = .N, ventas = sum(venta), efectividad = sum(venta)/.N ), by = .(oferta_tmk)][order(oferta_tmk)]
+```
+```{r}
+resultado_modelo_201908[, .(
+  clientes = .N,
+  ventas = sum(venta),
+  efectividad = sum(venta) / .N
+  ), by = .(oferta_tmk)] %>%
+  ggplot(aes(x = oferta_tmk, y = efectividad)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label= round(efectividad, 3)), vjust=1.6, color="white", size=3.5) +
+  labs(title = "Distribución de efectividad por producto", x = "decil")
+```
+
+```{r}
+aux <- resultado_modelo_201908[, .( efectividad_total = sum(venta)/.N ), by = .(oferta_tmk)][order(oferta_tmk)]
+aux1 <- resultado_modelo_201908[, .(clientes = .N, ventas = sum(venta), efectividad = sum(venta)/.N ), by = .(oferta_tmk, decil_oferta)][order(oferta_tmk,  decil_oferta)]
+aux2 <- merge(aux1, aux, by = "oferta_tmk")
+aux2[, uplift := efectividad/efectividad_total]
+aux2
+```
+Also uplift is decreasing from the top deciles
+
+```{r}
+ggplot(aux2, aes(x = decil_oferta, y = uplift, fill = oferta_tmk)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  labs(title = "Distribución del uplift por decil y producto", x = "decil")
+```
+
+
+## data used to scoring for august campaign 
+```{r}
+score_master <- get_path("datos/master/master_scoring", "06") %>% readRDS()
+head(score_master)
+```
+
+```{r}
+intersect( resultado_modelo_201908$definit, score_master$definit) %>% length == nrow(resultado_modelo_201908)
+```
+find most important variables
+```{r}
+cancer_important_vars <-
+  get_path(models_path, "prueba_20190717_cancer") %>%
+  get_path(key_searcher = "xgb_auc_important_variables") %>% 
+  fread()
+
+cancer_important_vars <- cancer_important_vars[order(-Gain), Feature][1:10]
+
+pif_important_vars <-
+  get_path(models_path, "prueba_20190717_pif") %>%
+  get_path(key_searcher = "xgb_auc_important_variables") %>% 
+  fread()
+
+pif_important_vars <- pif_important_vars[order(-Gain), Feature][1:10]
+
+
+fraude_important_vars <-
+  get_path(models_path, "prueba_20190717_fraude") %>%
+  get_path(key_searcher = "xgb_auc_important_variables") %>% 
+  fread()
+
+fraude_important_vars <- fraude_important_vars[order(-Gain), Feature][1:10]
+
+cancer_important_vars  
+fraude_important_vars
+pif_important_vars
+```
+  
+```{r}
+final_vars <- unique(c(cancer_important_vars, fraude_important_vars, pif_important_vars))
+names_score <- names(score_master)
+names_score <- 
+  stri_trans_general(names_score,"Latin-ASCII")
+names_score <- tm::removePunctuation(names_score)
+names_score <- gsub(" ", "", names_score, fixed = TRUE)
+
+final_vars <-c("definit", grep(paste0(final_vars, collapse = "|"), names_score , value = T))
+names(score_master) <- names_score
+score_master <- score_master[, mget(final_vars)]
+```
+
+```{r}
+sapply(score_master[, -"definit"], class)
+```
+
+```{r}
+resultados_modelo_201908 <- merge(resultado_modelo_201908, score_master, by = "definit")
+head(resultados_modelo_201908)
+```
+```{r}
+resultados_modelo_201908[oferta_tmk == "pif"& decil_oferta %in% paste0("decil_", c(1, 10))] %>% 
+  ggplot( aes(x = creditosmes, fill = decil_oferta)) +
+    geom_histogram( alpha=.5, position="identity")
+
+```
+
+```{r}
+product_plot <- resultados_modelo_201908[oferta_tmk == "pif"& decil_oferta %in% paste0("decil_", c(1, 10))] 
+aux <- summary(product_plot$creditosmes)
+cut <- aux[5] + (aux[5]- aux[2])*1.5
+product_plot <- product_plot[creditosmes <= cut]
+ggplot(product_plot, aes(x = antiguedadcta, fill = decil_oferta)) +
+    geom_histogram( alpha=.5, position="identity")
+```
+```{r}
+head(product_plot$antiguedadcta)
+```
+
+```{r}
+products <- unique(resultados_modelo_201908$oferta_tmk)
+final_vars <- final_vars[-1]
+i <-  products[1]
+j <-  final_vars[1]
+for(i in products){
+  for(j in final_vars){
+   product_plot <- resultados_modelo_201908[oferta_tmk == i & decil_oferta %in% paste0("decil_", c(1, 2, 3, 10))] 
+   setnames(product_plot, j, "var_plot")
+   product_plot[, decil_oferta2 := ifelse(decil_oferta == "decil_10", "Muy probables", "Poco probables")]
+aux <- summary(product_plot[, as.numeric(var_plot)])
+cut <- aux[5] + (aux[5]- aux[2])*1.5
+product_plot <- product_plot[var_plot <= cut]
+p1 <- ggplot(product_plot, aes(x = var_plot, fill = decil_oferta2)) +
+    geom_histogram( alpha=.5, position="identity") +
+  labs(title = paste("Distribucion de los ", j, "en el producto", i), x = j) 
+ggsave(paste0("plots/caraterizacion_clientes/", i, "_",j,".png" ), p1)
+  }
+}
+```
+
+```{r}
+
+```
+```{r}
+
+```
+

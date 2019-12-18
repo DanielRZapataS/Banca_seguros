@@ -1,0 +1,256 @@
+---
+title: "Analisis modelo de prooensción de seguros de cáncer para cuentas de ahoror"
+subtitle: "Meses Junio y Julio"
+author: "Daniel Zapata"
+date: "30 de julio de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+
+```{r}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table,
+  dplyr,
+  lubridate,
+  stringr,
+  zoo,
+  ggplot2,
+  Matrix,
+  stringi,
+  xgboost,
+  h2o,
+  openxlsx)
+'%!in%' <<-  Negate('%in%')
+source("modelos_propension_compra_cuentas/scripts/files_tools.R")
+source("modelos_propension_compra_cuentas/scripts/utils.R")
+source("modelos_propension_compra_cuentas/scripts/common_reports.R")
+
+```
+
+```{r}
+info_path <- "//bdbemcfs/Analytics/Informacion_Centralizada/Data_Analytics"
+root_path <- "///bdbemcfs/Banca_Seguros_Analytics"
+
+original_path <- os.path.join(root_path, "datos/original")
+staging_path <- os.path.join(root_path, "datos/staging")
+dictionary_path <- os.path.join(root_path,"datos/diccionarios")
+modeling_master_path <- "datos/master/master_modeling"
+scoring_master_path <- "datos/master/master_scoring"
+models_path <- "propension_compra"
+plots_product <- "plots/propension_compra/cuentas_ahorro"
+emisions_path <- paste(original_path, "emisiones_tmk", sep = "/")
+results_path <- c("resultados")
+cargue_path <- "resultados/cargue"
+```
+
+```{r}
+#### envios 201906 ####
+envio_201906 <- get_path(original_path, "cancer") %>% get_path(key_searcher = "201906") %>% fread()
+names(envio_201906)
+unique(envio_201906$propension)
+head(envio_201906)
+```
+
+
+```{r}
+envio_201906 <- envio_201906[, .(periodo = "201906", 
+                                 definit = paste0(TIPO, IDEN), 
+                                 grupo = ifelse(propension == "CON_PROPENSION", "tratamiento", "control"))]
+envio_201906[, .N, by = grupo]
+```
+
+```{r}
+### envios 201907 ####
+envio_modelo_201907 <- get_path(original_path, "cancer") %>% get_path(key_searcher = "201907_modelo") %>% fread()
+
+envio_all_201907 <- get_path(original_path, "cancer") %>% get_path(key_searcher = "201907_all") %>% fread()
+
+nrow(envio_201906)
+nrow(envio_all_201907)
+nrow(envio_modelo_201907)*2
+
+head(envio_modelo_201907)
+head(envio_all_201907)
+
+names(envio_all_201907)
+
+names(envio_modelo_201907)[names(envio_modelo_201907) %!in% names(envio_all_201907)]
+unique(envio_modelo_201907$CANCER_PROPEN)
+unique(envio_modelo_201907$`CANCER SIN PROPEN`)
+```
+
+```{r}
+envio_201907 <- envio_all_201907[, .(periodo = "201907", 
+                                 definit = paste0(TIPO_ID, id_cliente))]
+envio_201907[,grupo := "control"]
+envio_201907[ definit %in% envio_modelo_201907[, paste0(TIPO_ID, id_cliente)], grupo := "tratamiento"]
+envio_201907[, .N, by = grupo]
+```
+
+```{r}
+##### cargue probabilidades #### 
+score_201906 <-
+  get_path("envios_campañas_propension/score_modelos/propension_compra_cuentas",
+  "201906") %>% get_path(key_searcher = "cancer") %>% fread()
+
+score_201907 <-
+  get_path("envios_campañas_propension/score_modelos/propension_compra_cuentas",
+  "201907") %>% get_path(key_searcher = "cancer") %>% fread()
+score_201906[, periodo := "201906"]
+score_201907[, periodo := "201907"]
+head(score_201906)
+head(score_201907)
+```
+
+```{r}
+aux <- envio_modelo_201907[, .(definit = paste0(TIPO_ID, id_cliente), pred)]
+aux <- merge(aux, score_201907, by = "definit")
+aux[, diff := pred.x - pred.y]
+summary(aux$diff)
+```
+
+```{r}
+#Crear deciles de probabilidad
+score_201906[,decil := cut(pred, quantile(score_201906$pred, probs = seq(0, 1, by = 0.1)), labels = paste("decil", seq(1, 10,by = 1)),  include.lowest = TRUE)]
+
+score_201907[,decil := cut(pred, quantile(score_201907$pred, probs = seq(0, 1, by = 0.1)), labels = paste("decil", seq(1, 10,by = 1)),  include.lowest = TRUE)]
+
+unique(score_201906$decil)
+
+unique(score_201907$decil)
+```
+ 
+```{r}
+### cargue resultados ####
+resultados_201906 <- get_path("datos/original/resultados_tmk", "tmk_201906") %>% fread
+
+resultados_201907 <- get_path("datos/original/resultados_tmk", "tmk_201907") %>% fread
+
+resultados_201907[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+resultados_201906[duplicated(`Reporte_Llamadas_EstadoBases[CCCliente]`)]
+```
+ 
+```{r}
+envio_201907[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201906[, numid := str_extract(definit, "[[:digit:]]+")]
+envio_201907[duplicated(numid)]
+envio_201906[duplicated(numid)]
+
+```
+```{r}
+envios <- rbindlist(list(envio_201906, envio_201907))
+score <- rbindlist(list(score_201906, score_201907))
+resultados <- rbindlist(list(resultados_201906[, .(periodo = "201906", numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`), venta = `Reporte_Llamadas_EstadoBases[VENTAS]`)], resultados_201907[, .(periodo = "201907", numid = as.character(`Reporte_Llamadas_EstadoBases[CCCliente]`), venta = `Reporte_Llamadas_EstadoBases[VENTAS]`)]))
+
+analisis_resultados <- merge(envios, score, by = c("periodo", "definit"))
+envios[, .N, by = periodo ]
+analisis_resultados[, .N, by = periodo ]
+```
+
+
+```{r}
+resultados[, .N, by = periodo ]
+```
+
+
+
+```{r}
+envio_201907[numid %!in% resultados_201907$`Reporte_Llamadas_EstadoBases[CCCliente]`]
+```
+
+```{r}
+resultados_201907[`Reporte_Llamadas_EstadoBases[CCCliente]`  %!in% envio_201907$numid, .(`Reporte_Llamadas_EstadoBases[CCCliente]`, `Reporte_Llamadas_EstadoBases[VENTAS]`)]
+```
+
+```{r}
+nrow(resultados_201907) - nrow(envio_201907)
+```
+# Resultados de la campaña de seguros cuentas cancer 
+
+
+## registros 
+en el mes de julio se mandaron 25803 registros para la bventa de seguros de cuentas cancer 673, sin embargo no encontramos información para 126, aunque la gestion nos envio los resultados para 27064 de los cuales 1387 no pertenecen a la base enviada (los 25803).
+```{r}
+analisis_resultados <- merge(analisis_resultados, resultados, by = c("periodo", "numid"))
+analisis_resultados[, .N, by = periodo]
+```
+
+## división por grupo control y tratamiento 
+```{r}
+analisis_resultados[, .N, by = .(periodo, grupo)]
+```
+
+## efectividad de la campaña en los dos meses diferenciando por modelo
+
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo)]
+```
+
+```{r}
+analisis_resultados[, .(ventas = sum(venta), registros = .N, efectividad = round((sum(venta)/.N)*100, 2) ), by = .(periodo, grupo)]
+```
+
+```{r}
+analisis_resultados[, mean(pred), by = grupo]
+
+#Mirar si existe diferencia en probabilidad entre el grupo de control y tratamiento
+prob_aov <- aov(pred ~ grupo, data = analisis_resultados)
+summary(prob_aov)
+```
+
+```{r}
+#Diferencia en la probabilidad de adquisición entre el grupo de control y tratamiento
+ggplot(analisis_resultados[periodo == "201906"], aes(x = factor(grupo, levels = c(0,1), ordered = T), y = pred)) + 
+  geom_boxplot(aes(fill = factor(grupo))) + 
+  ggtitle("Distribución de probabilidad por grupo de control y tratamiento Junio") +
+  guides(fill = FALSE) + 
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  xlab("Control/Tratamiento") + 
+  ylab("Probabilidad estimada")
+``` 
+
+
+```{r}
+ggplot(analisis_resultados[periodo == "201907"], aes(x = factor(grupo, levels = c(0,1), ordered = T), y = pred)) + 
+  geom_boxplot(aes(fill = factor(grupo))) + 
+  ggtitle("Distribución de probabilidad por grupo de control y tratamiento Julio") +
+  guides(fill = FALSE) + 
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  xlab("Control/Tratamiento") + 
+  ylab("Probabilidad estimada")
+```
+# analisis por percentiles
+
+```{r}
+base_plot <- analisis_resultados[periodo == "201906", .(venta = sum(venta)), by = .(grupo, decil)]
+
+analisis_resultados[, .N , by = .(periodo, decil)]
+
+analisis_resultados[, unique(decil), by = .(grupo, periodo)]
+
+base_plot[, percentil_1 := percentil]
+base_plot[percentil %in% c("decil 93", "decil 94", "decil 95", "decil 96", "decil 97", "decil 98", "decil 99", "decil 100"), percentil_1 := "decil 10"]
+
+ggplot(base_plot[, sum(V1), by = percentil_1], aes(x = percentil_1, y = V1)) +
+  geom_col() +
+  xlab("") +
+  guides(fill=FALSE) +
+  ylab("Número de pólizas vendidas") +
+  labs(title = "Pólizas vendidas por decil de probabilidad de toda la base",
+       subtitle = "Producto: 673 - Cáncer") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0)) + 
+  geom_text(aes(label = comma(V1)), size = 3, vjust = -0.3) + 
+  scale_y_continuous(labels = comma)
+```

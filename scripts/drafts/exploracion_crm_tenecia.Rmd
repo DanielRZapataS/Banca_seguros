@@ -1,0 +1,211 @@
+---
+title: "tenecia_productos_crm"
+author: "Daniel Zapata"
+date: "7 de mayo de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r}
+library(data.table)
+library(dplyr)
+library(lubridate)
+options(scipen = 999)
+'%!in%' <<-  Negate('%in%')
+source("exploracion/files_tools.R")
+original_path <- "datos/original"
+```
+
+```{r}
+tenencia_productos_path <- c("datos/original/tenencia_productos")
+files_tenencia <- list.files(tenencia_productos_path, full.names = T) %>% file.info() %>% data.frame
+files_tenencia$file_path <- row.names(files_tenencia)
+files_tenencia <- data.table(files_tenencia)
+files_tenencia[, file_name :=  substr(list.files(tenencia_productos_path), 10, 16)]
+files_tenencia <- files_tenencia[isdir == F]
+
+```
+
+```{r}
+
+pn_products <-
+c(
+"ahorro",
+"tarj",
+"nomina",
+"crediservice",
+"cdt",
+"libranza",
+"libre_destino",
+"vivienda",
+"ctas_corrientes",
+"vehiculos"
+)
+
+
+bases_list <- list()
+for (i in 1:nrow(files_tenencia)) {
+  print(files_tenencia$file_name[i])
+  
+  base <-
+    fread(
+      files_tenencia$file_path[i],
+      colClasses = "character"
+    )
+  base[, periodo := files_tenencia$file_name[i]]
+  names(base) <- tolower(names(base))
+  var_int <-
+    grep(paste(c(
+       "periodo", "identificacion", pn_products
+    ), collapse = "|"), names(base), value = T)
+  
+  base <- base[, mget(var_int)]
+  bases_list[[i]] <- base
+  rm(base)
+  gc()
+}
+head(bases_list)
+sapply(bases_list, names)
+tenencia <- rbindlist(bases_list, use.names = F)
+rm(bases_list)
+gc()
+tenencia <- tenencia[tipo_identificacion %!in% c("N")]
+tenencia <- tenencia[, lapply(.SD, function(x){ifelse(x == "", 0, x)})]
+```
+
+```{r}
+productos <- names(tenencia)[grepl("cant_*", names(tenencia))]
+
+tenencia[,(productos):=lapply(.SD, as.numeric), .SDcols = productos]
+
+tenencia[, total_products := rowSums(tenencia[, mget(productos)])]
+tenencia[, .N, by = .(total_products, periodo)][order(-total_products, periodo)]
+```
+```{r}
+unique(tenencia$tipo_identificacion)
+```
+```{r}
+tenencia[total_products == 0, .N, by = .(periodo, tipo_identificacion)]
+```
+```{r}
+tenencia[, .N, by = periodo]
+```
+
+```{r}
+tenencia[, uniqueN(paste0(tipo_identificacion, numero_identificacion)), by = periodo]
+```
+
+## crm 
+```{r}
+crm_path <- c("datos/original/crm_personas_naturales")
+crm_files_path <- list.files(crm_path, full.names = T)
+crm <- fread(crm_files_path[1], colClasses = "character")
+names(crm) <- tolower(names(crm))  
+names(crm)
+```
+```{r}
+head(crm)
+```
+
+```{r}
+dictionary_path <- get.path(original_path, "diccionarios")
+dicc_segmentos <- get.path(dictionary_path, "segmento") %>% 
+  fread(colClasses = "character", header = T)
+dicc_segmentos[, segmento := factor(segmento)]
+```
+
+
+```{r}
+crm[, periodo := paste0(periodo, "01")]
+crm[, periodo := as.Date(periodo, "%Y%m%d")]
+dates <- grep("fecha", names(crm), value = T)
+crm[,(dates):= lapply(.SD, as.Date), .SDcols = dates]
+```
+
+Crear variables de edad y antigüedad
+```{r}
+# age
+crm[, edad := round(interval(start = crm_fecha_nacimiento,
+                            end = periodo) /
+                     duration(num = 1, units = "years"))]
+# antiguedad
+crm[, antiguedad := round(interval(start = crm_fecha_vinculacion_banco,
+                                   end = periodo) /
+                            duration(num = 1, units = "months"))]
+head(crm)
+```
+
+```{r}
+crm[, .N, by = crm_estrato ]
+```
+```{r}
+names(crm)
+```
+
+```{r}
+fin_vars <- grep("valor|num", names(crm), value=T)
+crm[, (fin_vars) := lapply(.SD, as.numeric), .SDcols = fin_vars]
+
+```
+
+```{r}
+crm <- merge(crm, dicc_segmentos, by = "crm_nombre_segmento", all.x = T)
+crm[, .N, by = crm_nombre_segmento][order(-N)]
+crm[, .N, by = segmento][order(-N)]
+```
+```{r}
+crm[, segmento_comercial := segmento]
+crm[segmento == "Preferente" & is.na(crm_codigo_subsegmento), 
+    segmento_comercial := "Preferente" ]
+crm[segmento == "Preferente" & crm_codigo_subsegmento == "35", 
+    segmento_comercial := "Preferente Plus"]
+
+```
+
+
+limpiar duplicados
+```{r}
+nrow(crm) == uniqueN(crm[, paste0(crm_tipo_identificacion, crm_numero_identificacion)])
+```
+
+```{r}
+crm[, crm_id := paste0(crm_tipo_identificacion, crm_numero_identificacion)]
+base_duplicados <- crm[ crm_id %in% crm[duplicated(crm_id), crm_id]][order(-crm_id)]
+base_duplicados
+```
+
+```{r}
+limpieza_duplicados <- base_duplicados[, .(crm_id, crm_fecha_vinculacion_banco)]
+limpieza_duplicados <- limpieza_duplicados[ order(crm_id, - crm_fecha_vinculacion_banco)]
+limpieza_duplicados[, crm_fecha_vin_lag := shift(crm_fecha_vinculacion_banco, 1, 0, "lead"), by = crm_id]
+limpieza_duplicados <- limpieza_duplicados[crm_fecha_vin_lag != "1970-01-01"]
+limpieza_duplicados[, days := crm_fecha_vinculacion_banco - crm_fecha_vin_lag]
+id_duplicads <- limpieza_duplicados[days <1, crm_id]
+
+```
+
+```{r}
+crm[crm_id == id_duplicads]
+```
+
+```{r}
+crm_no_duplicados <- crm[crm_id %!in% limpieza_duplicados$crm_id ]
+crm_no_duplicados[ crm_id %in% crm_no_duplicados[duplicated(crm_id), crm_id]][order(-crm_id)]
+
+crm_registros_unicos <-
+  merge(limpieza_duplicados[, crm_id, crm_fecha_vinculacion_banco],
+  crm,
+  by = c("crm_id", "crm_fecha_vinculacion_banco"))
+  
+crm_registros_unicos <- crm_registros_unicos[crm_id %!in% id_duplicads]
+
+setcolorder(crm_no_duplicados, names(crm_registros_unicos))
+crm_lp <-  rbindlist(list(crm_registros_unicos, crm_no_duplicados))
+nrow(crm) - nrow(crm_lp)
+
+```
+

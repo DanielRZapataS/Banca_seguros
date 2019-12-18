@@ -1,0 +1,114 @@
+---
+title: "Creación de la tabla maestra"
+subtitle: "Preparación de datos"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+# Markdown options to avoid printing and set working directory
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+options(prompt="Seguros> ", continue=" ") 
+```
+
+```{r cargue de datos y limpieza, results='hide'}
+#Inicialización del proyecto
+set.seed(123)
+rm(list = ls())
+options(scipen=999)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("openxlsx", "data.table", "ggplot2","scales", "dplyr", "zoo", "kohonen",
+               "GGally", "factoextra", "mclust", "dbscan", "outliers",
+               "rpart", "rsample", "rpart.plot", "ipred", "caret", "lubridate", "tree",
+               "tictoc", "pROC", "InformationValue")
+
+source("scripts/utils.R")
+```
+
+```{r}
+#Importar la base de ventas y saldos
+base_ventas_cuentas <- fread("datos/staging/base_target_saldos_ahorros.csv")
+base_ventas_cuentas[, lag1 := as.yearmon(lag1)]
+base_ventas_cuentas[, periodo1 := as.yearmon(periodo1)]
+setnames(base_ventas_cuentas, names(base_ventas_cuentas), tolower(names(base_ventas_cuentas)))
+
+#Importar bases de tenencia
+archivos_tenencia <- list.files("datos/staging/tenencia_productos", full.names = T)
+fechas_archivos_tenencia <- as.yearmon(substr(archivos_tenencia, 43, 49), format = "%Y_%m")
+archivos_tenencia <- data.table(nombre = archivos_tenencia, fecha = fechas_archivos_tenencia)[order(-fecha)]
+
+for(j in 1:nrow(archivos_tenencia))
+{
+  if(j == 1){
+      base_tenencia <- readRDS(archivos_tenencia$nombre[j])
+    } else {
+      base_tenencia <- rbind(base_tenencia, readRDS(archivos_tenencia$nombre[j]))
+    }
+}
+
+#Importar bases de CRM
+archivos_crm <- list.files("datos/staging/crm", full.names = T)
+fechas_archivos_crm <- as.yearmon(substr(archivos_crm, 23, 29), format = "%Y_%m")
+archivos_crm <- data.table(nombre = archivos_crm, fecha = fechas_archivos_crm)[order(-fecha)]
+
+for(j in 1:nrow(archivos_crm))
+{
+  print(j)
+  if(j == 1){
+      base_crm <- readRDS(archivos_crm$nombre[j])
+    } else {
+      temp <- readRDS(archivos_crm$nombre[j])
+      base_crm <- rbind(base_crm, temp[, .SD, .SDcols = names(base_crm)])
+    }
+  rm(temp)
+}
+```
+
+```{r}
+#Formatear fechas
+base_tenencia[, periodo := as.yearmon(periodo, format = "%Y_%m")]
+base_crm[, periodo := as.yearmon(periodo)]
+
+#Quitar duplicados de CRM
+base_crm <- base_crm[!duplicated(crm_id)]
+
+#Crear id 
+base_tenencia[, id := paste0(tipo_identificacion, numero_identificacion)]
+
+#Pegar base de target y tenencia
+master <- merge(base_ventas_cuentas, base_tenencia, by.x = c("definit", "lag1"), by.y = c("id", "periodo"), all.x = T)
+
+#Pegar tabla maestra y crm
+master <- merge(master, base_crm, by.x = c("definit"), by.y = c("crm_id"), all.x = T)
+
+#Eliminar variables
+variables_eliminar <- c("lag1", "tipo_identificacion", "numero_identificacion", "num_id", "tipo_id", "tipo_base", "tipo_producto", "tipo_seguro", "producto_financiero_gnral", "producto", "numero_producto", "fecha_apertura", "valor_ultimo_deposito", "grupo_ciiu", "crm_ciiu")
+master[, (variables_eliminar) := NULL]
+setnames(master, "comprado", "target")
+
+variables_factor <- c("excen_gfm", "crm_estrato", "crm_genero", "crm_nombre_nivel_educativo", "crm_nombre_estado_civil", "crm_codigo_tipo_vivienda", "crm_nombre_ocupacion", "crm_grupo_ocupacion", "crm_declara_renta", "departamento", "crm_grupo_segmento")
+master[, (variables_factor) := lapply(.SD, as.factor), .SDcols = variables_factor]
+
+#Limpiar base de NAs
+master <- master[!(is.na(codigo_subproducto))]
+
+master[!complete.cases(master)]
+
+saveRDS(master, file = "datos/master/master_2019_04.rds")
+
+readRDS("datos/master/master_2019_04.rds")
+```
+
+```{r}
+#Agrega filas en archivo de ventas
+
+```
+
+
