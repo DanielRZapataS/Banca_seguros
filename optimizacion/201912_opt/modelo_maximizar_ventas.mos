@@ -1,0 +1,81 @@
+!@encoding CP1252
+model ModelName
+uses "mmxprs"; !gain access to the Xpress-Optimizer solver
+
+parameters	
+	
+	inputfile="model.dat"
+
+end-parameters
+
+declarations	
+	
+	!Conjuntos
+	G: set of string					!conjunto de grupos
+	S: set of string					!Conunto de seguros
+	D: set of integer 					!Conjunto d deciles
+	
+	!Parámetros
+	n: array(G) of integer			!Cantidad de personas en el grupo
+	k: array(G,S) of real			!Efectividad del grupo g \in G en el seguro s \in S
+	decil: array(G,S) of integer		!decil del grupo g\in G en el seguro s \in S
+	maximo: array(D) of real		!Máximoa gastar de personas en un decil 
+	r: integer				!Cantidad máxima de registros a enviar
+
+	!Variables de Decisión
+	x: array(G,S) of mpvar		!1, si voy del origen i \in C a destino j \in C. 0, d.l.c.
+	
+end-declarations
+
+!Inicializar
+initializations from 	inputfile
+	
+	n k r decil maximo
+
+end-initializations
+
+!Naturaleza de variables y creación
+forall(g in G, s in S )do
+	create(x(g,s))
+	x(g,s) is_integer
+end-do
+
+!RESTRICCIONES
+!1. No enviar a una persona a dos seguros
+forall(g in G)
+	sum(s in S)x(g,s) <= n(g)
+
+!2. No enviar más de los registros permitidos
+
+	sum(g in G, s in S) x(g,s) <=  r
+
+!3. No gastar más de un decil que lo permitido
+forall(d in D, s in S)
+	sum(g in G | decil(g,s) = d) x(g,s) <= maximo(d)*sum(g in G | decil(g,s) = d)n(g)
+	
+!FUNCIÓN OBJETIVO
+!Maximizar las ventas
+fo:=sum(g in G, s in S) x(g,s)*k(g,s)
+maximize(fo)
+
+writeln("Registros enviados: ", sum(g in G, s in S) x(g,s).sol)
+writeln("Ventas totales: ", sum(g in G, s in S) x(g,s).sol*k(g,s))
+writeln("")
+forall(s in S) do
+	writeln(s, ":")
+	writeln("\t", "Registros: ", sum(g in G | x(g,s).sol >0) x(g,s).sol)
+	writeln("\t", "Ventas: ", sum(g in G) x(g,s).sol * k(g,s))
+end-do
+
+writeln("")
+writeln("RESULTADOS DESAGREGADOS")
+writeln(" ")
+forall(s in S) do
+	writeln(s, ": ", sum(g in G | x(g,s).sol >0) x(g,s).sol)
+	writeln("ventas: ", sum(g in G) x(g,s).sol * k(g,s))
+	forall(g in G | x(g,s).sol > 0)
+		writeln(g, ":", x(g,s).sol)
+	writeln(" ")
+end-do
+
+end-model
